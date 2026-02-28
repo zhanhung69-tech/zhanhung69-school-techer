@@ -1,18 +1,37 @@
 import streamlit as st
 import pandas as pd
-import os
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 
-st.title("校園巡查登記系統 (實務進化版)")
+st.title("校園巡查登記系統 (Google 試算表連線版)")
 st.divider()
 
 # ==========================================
-# 核心資料庫與暫存區設定
+# 核心升級：連接 Google 試算表
 # ==========================================
-DB_FILE = "school_master_records.csv"
+# 1. 從隱形保險箱拿出鑰匙
+try:
+    creds_json = json.loads(st.secrets["google_json"])
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+    client = gspread.authorize(creds)
+    
+    # 2. 打開學務處的總表
+    sheet = client.open("全校巡查總資料庫").sheet1
+    
+    # 3. 防呆：如果表格是全空的，自動幫它加上標題列
+    if not sheet.row_values(1):
+        sheet.append_row(["時間", "對象", "班級", "座號", "學號", "姓名", "狀況", "得分", "回報人"])
+        
+except Exception as e:
+    st.error("⚠️ 系統連線 Google 試算表失敗，請聯絡管理員確認金鑰設定。")
+    st.stop() # 如果連線失敗，系統直接停止運作，保護資料
 
-if not os.path.exists(DB_FILE):
-    pd.DataFrame(columns=["時間", "對象", "班級", "座號", "學號", "姓名", "狀況", "得分", "回報人"]).to_csv(DB_FILE, index=False, encoding='utf-8-sig')
-
+# 模擬教務處的學生資料庫
 student_db = {
     "112001": {"姓名": "王小明", "班級": "餐一忠", "座號": "01"},
     "112002": {"姓名": "李小華", "班級": "資處一孝", "座號": "05"},
@@ -22,8 +41,6 @@ student_db = {
 
 if "temp_records" not in st.session_state:
     st.session_state.temp_records = []
-
-# --- 新增：身分記憶體 ---
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
@@ -31,8 +48,6 @@ if "current_user" not in st.session_state:
 # 1. 綁定回報人員 (登入鎖定機制)
 # ==========================================
 st.subheader("👤 巡查人員報到")
-
-# 如果記憶體裡「沒有」登入資料，就顯示輸入框
 if st.session_state.current_user is None:
     col_role, col_name = st.columns(2)
     with col_role:
@@ -44,15 +59,12 @@ if st.session_state.current_user is None:
         if reporter_name == "":
             st.error("⚠️ 請務必輸入姓名！")
         else:
-            # 把身分存進記憶體，並重新整理網頁
             st.session_state.current_user = f"{role}-{reporter_name}"
             st.rerun()
-            
-# 如果記憶體裡「有」登入資料，就顯示歡迎詞和登出按鈕
 else:
     st.success(f"✅ 目前巡查人員：**{st.session_state.current_user}**")
     if st.button("🔄 卸除身分 (換人登入)"):
-        st.session_state.current_user = None # 清空記憶體
+        st.session_state.current_user = None
         st.rerun()
 
 st.divider()
@@ -60,9 +72,7 @@ st.divider()
 # ==========================================
 # 2. 巡查紀錄填寫
 # ==========================================
-st.subheader("📝 填寫巡查紀錄 (批次輸入區)")
-
-# 防呆：如果還沒鎖定身分，就不給填寫資料
+st.subheader("📝 填寫巡查紀錄")
 if st.session_state.current_user is None:
     st.warning("⚠️ 請先在上方完成「巡查人員報到」並鎖定身分，即可解鎖登記系統。")
 else:
@@ -86,7 +96,6 @@ else:
             
         student_id, student_name, seat_num = "無", "無", "無"
         status = st.text_input("請輸入班級巡查狀況：")
-    
     else:
         col_id, col_status = st.columns(2)
         with col_id:
@@ -105,9 +114,6 @@ else:
         else:
             selected_class, student_name, seat_num = "-", "-", "-"
     
-    # ==========================================
-    # 3. 暫存與批次上傳邏輯
-    # ==========================================
     if st.button("➕ 加入下方暫存清單", use_container_width=True):
         if record_type == "個人違規紀錄" and (len(student_id) != 6 or student_name == "未知"):
             st.error("⚠️ 個人紀錄請務必輸入正確且存在於資料庫的 6 碼學號！")
@@ -138,40 +144,50 @@ else:
                 "姓名": student_name,
                 "狀況": status,
                 "得分": score_num,
-                "回報人": st.session_state.current_user # 直接使用鎖定好的身分
+                "回報人": st.session_state.current_user 
             }
             st.session_state.temp_records.append(new_record)
 
 # ==========================================
-# 顯示暫存區 (購物車概念)
+# 3. 暫存區與批次上傳至 Google 試算表
 # ==========================================
 if len(st.session_state.temp_records) > 0:
-    st.markdown("### 🛒 待上傳的暫存紀錄 (請確認無誤後上傳)")
-    temp_df = pd.DataFrame(st.session_state.temp_records)
-    st.dataframe(temp_df, use_container_width=True)
+    st.markdown("### 🛒 待上傳的暫存紀錄")
+    st.dataframe(pd.DataFrame(st.session_state.temp_records), use_container_width=True)
     
     col_upload, col_clear = st.columns(2)
     with col_upload:
-        if st.button("🚀 確認無誤，全數寫入總資料庫", type="primary", use_container_width=True):
-            master_df = pd.read_csv(DB_FILE)
-            updated_df = pd.concat([master_df, temp_df], ignore_index=True)
-            updated_df.to_csv(DB_FILE, index=False, encoding='utf-8-sig')
+        if st.button("🚀 確認無誤，全數寫入 Google 試算表", type="primary", use_container_width=True):
+            # 將暫存區的資料轉換成 Google 試算表需要的格式 (清單的清單)
+            upload_data = []
+            for record in st.session_state.temp_records:
+                upload_data.append([
+                    record["時間"], record["對象"], record["班級"], record["座號"],
+                    record["學號"], record["姓名"], record["狀況"], record["得分"], record["回報人"]
+                ])
+            
+            # 一次性將所有資料寫入雲端總表的最下方
+            sheet.append_rows(upload_data)
+            
             st.session_state.temp_records = []
-            st.success("✅ 所有資料已成功寫入！")
+            st.success("✅ 所有資料已成功寫入學務處專屬 Google 試算表！")
             st.rerun() 
             
     with col_clear:
-        if st.button("🗑️ 清空暫存區 (重新輸入)", use_container_width=True):
+        if st.button("🗑️ 清空暫存區", use_container_width=True):
             st.session_state.temp_records = []
             st.rerun()
 
+# ==========================================
+# 4. 顯示全校共用總表 (從 Google 試算表讀取)
+# ==========================================
 st.divider()
-st.subheader("📊 全校巡查總資料庫")
-try:
-    master_df = pd.read_csv(DB_FILE)
-    if len(master_df) > 0:
-        st.dataframe(master_df, use_container_width=True)
-    else:
-        st.info("目前總資料庫尚無紀錄。")
-except Exception as e:
-    st.error("讀取資料庫時發生錯誤。")
+st.subheader("📊 全校巡查總資料庫 (即時連線)")
+
+# 取得試算表中所有的資料
+all_data = sheet.get_all_records()
+
+if len(all_data) > 0:
+    st.dataframe(pd.DataFrame(all_data), use_container_width=True)
+else:
+    st.info("目前的 Google 試算表尚無任何紀錄。")
