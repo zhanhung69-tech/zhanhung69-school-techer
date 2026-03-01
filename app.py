@@ -20,6 +20,7 @@ REAL_CLASS_LIST = {
 }
 
 def safe_get_dataframe(sheet):
+    if sheet is None: return pd.DataFrame()
     data = sheet.get_all_values()
     if not data: return pd.DataFrame()
     headers = data[0]
@@ -33,7 +34,7 @@ def safe_get_dataframe(sheet):
     return pd.DataFrame(columns=clean_headers)
 
 # ==========================================
-# Google 試算表連線與智慧快取引擎 (解決 429 錯誤的核心)
+# Google 試算表連線與智慧快取引擎
 # ==========================================
 @st.cache_resource
 def init_gspread():
@@ -42,22 +43,33 @@ def init_gspread():
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     return gspread.authorize(creds)
 
-# 1. 靜態資料快取 10 分鐘，大幅減少 API 請求
+# 1. 靜態資料快取
 @st.cache_data(ttl=600)
 def load_static_data():
     client = init_gspread()
     doc = client.open("全校巡查總資料庫")
     
-    # 讀取學生名單
+    # 讀取學生名單 (增加多重名稱辨識容錯)
     try:
-        df_stu = safe_get_dataframe(doc.worksheet("學生名單"))
+        try:
+            ws_stu = doc.worksheet("學生名單")
+        except:
+            ws_stu = doc.worksheet("基本資料庫") # 容許您命名為基本資料庫
+            
+        df_stu = safe_get_dataframe(ws_stu)
+        
+        # 清理欄位空白並智慧更名
+        df_stu.columns = df_stu.columns.str.strip()
         rename_map = {"班級名稱": "班級", "手機號碼": "學生手機", "家長電話": "家長聯絡電話"}
         df_stu.rename(columns=rename_map, inplace=True)
+        
         for col in ['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話']:
             if col not in df_stu.columns: df_stu[col] = ""
         df_stu['學號'] = df_stu['學號'].astype(str).str.strip()
         df_stu['座號'] = df_stu['座號'].astype(str).str.zfill(2)
-    except: df_stu = pd.DataFrame()
+    except: 
+        # 終極防當機：若完全讀不到，直接塞給系統標準空欄位，杜絕 KeyError
+        df_stu = pd.DataFrame(columns=['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話'])
     
     # 讀取帳號密碼
     try:
@@ -78,7 +90,7 @@ def load_static_data():
     
     return df_stu, df_acc, df_rules
 
-# 2. 動態紀錄資料快取 1 分鐘 (專供管理中心讀取使用)
+# 2. 動態紀錄資料快取 
 @st.cache_data(ttl=60)
 def load_log_data(sheet_name):
     client = init_gspread()
@@ -88,7 +100,7 @@ def load_log_data(sheet_name):
         return safe_get_dataframe(ws)
     except: return pd.DataFrame()
 
-# 3. 專屬寫入通道 (僅在送出時連線，絕不佔用預設流量)
+# 3. 專屬寫入通道
 def get_sheet_for_writing(sheet_name, default_headers=None):
     client = init_gspread()
     doc = client.open("全校巡查總資料庫")
@@ -134,11 +146,10 @@ with st.sidebar:
         u = st.session_state.current_user
         st.success(f"✅ 登入成功\n\n👤 {u['name']}\n🏷️ {u['role']}\n📍 {u['class']}")
         
-        # 管理員專屬：強制重整快取
+        # 強制重整雲端資料庫按鈕，解決快取不同步
         if u["role"] == "管理員":
             if st.button("🔄 強制重整雲端資料庫", use_container_width=True):
-                load_static_data.clear()
-                load_log_data.clear()
+                st.cache_data.clear() # 徹底清除快取重抓
                 st.success("✅ 資料庫已重新同步！")
                 st.rerun()
                 
@@ -223,7 +234,7 @@ if app_mode == "🔭 全校巡查登記":
                 ws = get_sheet_for_writing("巡查紀錄")
                 upload_data = [[r["日期"], r["時間"], r["對象"], r["班級"], r["座號"], r["學號"], r["姓名"], r["狀況"], r["得分"], r["回報人"]] for r in st.session_state.temp_records]
                 ws.append_rows(upload_data)
-                load_log_data.clear() # 清除讀取快取
+                load_log_data.clear() 
                 st.session_state.temp_records = []
                 st.success("✅ 資料寫入成功！")
                 st.rerun() 
@@ -240,10 +251,15 @@ elif app_mode == "📝 僑生假單申請":
     user = st.session_state.current_user
     overseas_classes = ["資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "餐一和", "餐一平", "資訊二孝"]
     target_class = st.selectbox("請選擇要操作的班級", overseas_classes) if user["role"] == "管理員" else user["class"]
-    class_students = df_students[df_students["班級"] == target_class].copy()
+    
+    # 【防錯機制】確認 Dataframe 有「班級」欄位才去篩選
+    if not df_students.empty and "班級" in df_students.columns:
+        class_students = df_students[df_students["班級"] == target_class].copy()
+    else:
+        class_students = pd.DataFrame()
     
     if class_students.empty:
-        st.warning(f"查無 {target_class} 的學生資料。")
+        st.warning(f"⚠️ 雲端名單資料庫中查無 {target_class} 的學生資料。請管理員確認試算表『學生名單』分頁是否包含『班級』欄位。")
     else:
         class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
         with st.expander("第一步：設定假別並加入本週清單", expanded=True):
@@ -345,19 +361,27 @@ elif app_mode == "🏆 獎懲建議單申請":
         if user["class"] == "全校":
             st.warning("💡 您目前為全校權限(非班級導師)，請使用「依年級/班級搜尋」或「輸入學號」模式。")
         else:
-            class_students = df_students[df_students["班級"] == user["class"]].copy()
+            if not df_students.empty and "班級" in df_students.columns:
+                class_students = df_students[df_students["班級"] == user["class"]].copy()
+            else:
+                class_students = pd.DataFrame()
+                
             if not class_students.empty:
                 class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
                 selected_display = st.multiselect("請勾選本班學生：", class_students["顯示名稱"].tolist())
                 selected_students = class_students[class_students["顯示名稱"].isin(selected_display)]
-            else: st.error(f"查無 {user['class']} 學生資料。")
+            else: st.error(f"查無 {user['class']} 學生資料，請確認雲端名單。")
                 
     elif input_mode == "🏫 依年級/班級搜尋 (跨班利器)":
         col_g, col_c = st.columns(2)
         with col_g: search_grade = st.selectbox("👉 1. 選擇年級", ["一年級", "二年級", "三年級"])
         with col_c: search_class = st.selectbox("👉 2. 選擇班級", REAL_CLASS_LIST[search_grade])
             
-        class_students = df_students[df_students["班級"] == search_class].copy()
+        if not df_students.empty and "班級" in df_students.columns:
+            class_students = df_students[df_students["班級"] == search_class].copy()
+        else:
+            class_students = pd.DataFrame()
+            
         if not class_students.empty:
             class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
             selected_display = st.multiselect(f"👉 3. 請勾選 {search_class} 學生 (可多選)：", class_students["顯示名稱"].tolist())
@@ -431,7 +455,7 @@ elif app_mode == "🏆 獎懲建議單申請":
         components.html(st.session_state.print_reward_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組四：綜合數據中心 (包含安全寫入防錯)
+# 模組四：綜合數據中心
 # ==========================================
 elif app_mode == "📊 綜合數據中心 (管理員專屬)":
     st.header("📊 綜合數據中心")
