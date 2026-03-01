@@ -18,7 +18,7 @@ tw_time = datetime.utcnow() + timedelta(hours=8)
 today_date = tw_time.strftime("%Y-%m-%d")
 
 # ==========================================
-# 連接 Google 試算表
+# 連接 Google 試算表 (新增帳密分頁)
 # ==========================================
 @st.cache_resource
 def init_gspread():
@@ -32,33 +32,53 @@ try:
     doc = client.open("全校巡查總資料庫")
     sheet_records = doc.sheet1  
     
+    # 僑生請假紀錄分頁
     try:
         sheet_leave = doc.worksheet("僑生請假紀錄")
     except:
         sheet_leave = doc.add_worksheet(title="僑生請假紀錄", rows="2000", cols="12")
         sheet_leave.append_row(["紀錄日期", "班級", "座號", "學號", "姓名", "類別", "起點日期", "迄止日期", "細節與時間", "外宿地點", "親友/關係/電話", "經辦人"])
+        
+    # --- 新增：系統帳號密碼分頁 ---
+    try:
+        sheet_accounts = doc.worksheet("系統帳號密碼")
+    except:
+        sheet_accounts = doc.add_worksheet(title="系統帳號密碼", rows="100", cols="5")
+        sheet_accounts.append_row(["帳號", "密碼", "職務", "姓名", "負責班級"])
+        # 自動幫主任建立第一組最高權限帳號 (後續可自行在試算表修改)
+        sheet_accounts.append_row(["admin", "1234", "管理員", "展宏主任", "全校"])
+        
 except Exception as e:
     st.error("⚠️ 系統連線失敗，請檢查金鑰設定。")
     st.stop()
 
 # ==========================================
-# 讀取學生名冊
+# 讀取資料庫 (名單與帳號)
 # ==========================================
 @st.cache_data(ttl=300)
-def load_student_df():
+def load_data():
     try:
+        # 讀學生名單
         sheet_students = doc.worksheet("學生名單")
-        df = pd.DataFrame(sheet_students.get_all_records())
+        df_stu = pd.DataFrame(sheet_students.get_all_records())
         for col in ['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話']:
-            if col not in df.columns:
-                df[col] = ""
-        df['學號'] = df['學號'].astype(str).str.strip()
-        df['座號'] = df['座號'].astype(str).str.zfill(2)
-        return df
+            if col not in df_stu.columns:
+                df_stu[col] = ""
+        df_stu['學號'] = df_stu['學號'].astype(str).str.strip()
+        df_stu['座號'] = df_stu['座號'].astype(str).str.zfill(2)
+        
+        # 讀帳號密碼
+        df_acc = pd.DataFrame(sheet_accounts.get_all_records())
+        # 確保帳號密碼是文字格式以防比對錯誤
+        df_acc['帳號'] = df_acc['帳號'].astype(str).str.strip()
+        df_acc['密碼'] = df_acc['密碼'].astype(str).str.strip()
+        
+        return df_stu, df_acc
     except:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-df_students = load_student_df()
+df_students, df_accounts = load_data()
+
 if not df_students.empty:
     student_db = df_students.set_index('學號').to_dict('index')
 else:
@@ -68,47 +88,46 @@ else:
 if "temp_records" not in st.session_state:
     st.session_state.temp_records = []
 if "leave_cart" not in st.session_state:
-    st.session_state.leave_cart = [] # 假單專用的購物車
+    st.session_state.leave_cart = [] 
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
 # ==========================================
-# 側邊欄：嚴格身分與權限綁定
+# 側邊欄：嚴格帳號密碼登入
 # ==========================================
 with st.sidebar:
     st.title("📂 系統選單")
     
-    if "role" in st.query_params and "name" in st.query_params and st.session_state.current_user is None:
-        st.session_state.current_user = {
-            "role": st.query_params['role'],
-            "name": st.query_params['name'],
-            "class": st.query_params.get('class', '全校')
-        }
-
-    overseas_classes = ["資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "餐一和", "餐一平", "資訊二孝"]
-
+    # 登入介面
     if st.session_state.current_user is None:
-        role = st.selectbox("您的職務", ["學務主任", "教務主任", "生輔員", "行政", "導師", "管理員"])
+        st.subheader("🔐 人員登入")
+        login_user = st.text_input("請輸入帳號")
+        login_pwd = st.text_input("請輸入密碼", type="password") # 密碼會以星號隱藏
         
-        if role == "導師":
-            u_class = st.selectbox("負責班級", overseas_classes)
-            u_name = st.text_input("老師姓名")
-        else:
-            u_class = "全校"
-            u_name = st.text_input("您的姓名")
-            
-        if st.button("🔐 登入系統", type="primary"):
-            if u_name == "":
-                st.error("請輸入姓名！")
+        if st.button("登入系統", type="primary", use_container_width=True):
+            if login_user == "" or login_pwd == "":
+                st.error("⚠️ 帳號或密碼不可為空！")
+            elif df_accounts.empty:
+                st.error("⚠️ 尚未建立帳號資料庫！")
             else:
-                st.session_state.current_user = {"role": role, "name": u_name, "class": u_class}
-                st.rerun()
+                # 驗證帳號密碼
+                match = df_accounts[(df_accounts['帳號'] == login_user) & (df_accounts['密碼'] == login_pwd)]
+                if not match.empty:
+                    user_info = match.iloc[0]
+                    st.session_state.current_user = {
+                        "role": user_info['職務'],
+                        "name": user_info['姓名'],
+                        "class": user_info['負責班級']
+                    }
+                    st.rerun()
+                else:
+                    st.error("❌ 帳號或密碼錯誤，請重新輸入！")
     else:
+        # 已登入狀態
         u = st.session_state.current_user
-        st.success(f"✅ 已登入身分：\n職務：{u['role']}\n姓名：{u['name']}\n權限區：{u['class']}")
-        if st.button("🔄 卸除身分登出"):
+        st.success(f"✅ 登入成功\n\n👤 姓名：{u['name']}\n🏷️ 職務：{u['role']}\n📍 權限區：{u['class']}")
+        if st.button("🔄 登出系統", use_container_width=True):
             st.session_state.current_user = None
-            st.query_params.clear()
             st.rerun()
 
     st.divider()
@@ -123,15 +142,13 @@ with st.sidebar:
         if curr_role == "管理員":
             menu_options.append("📊 綜合數據中心")
             
-    app_mode = st.radio("功能切換", menu_options if menu_options else ["🔒 請先登入解鎖系統"])
+    app_mode = st.radio("功能切換", menu_options if menu_options else ["🔒 系統已鎖定"])
 
 # ==========================================
 # 模組一：全校巡查登記
 # ==========================================
 if app_mode == "🔭 全校巡查登記":
     st.header("🔭 全校巡查即時登記")
-    # (此處完美保留您的巡查邏輯，因為字數限制不在此重複貼出，請保留您原本這段 `if app_mode == "🔭 全校巡查登記":` 的全部內容)
-    # [註：實務上請將上一版的巡查模組貼回這裡]
     time_period = st.selectbox("請選擇巡查時間", ["0810-0900 第一節", "0910-1000 第二節", "1010-1100 第三節", "1110-1200 第四節", "1230-1300 午休", "1310-1400 第五節", "1410-1500 第六節", "1510-1600 第七節"])
     record_type = st.radio("📌 請選擇登記對象", ["班級整體表現", "個人違規紀錄"], horizontal=True)
     
@@ -207,12 +224,13 @@ if app_mode == "🔭 全校巡查登記":
                 st.rerun()
 
 # ==========================================
-# 模組二：僑生假單申請 (升級版：購物車機制 + 完美 PDF)
+# 模組二：僑生假單申請
 # ==========================================
 elif app_mode == "📝 僑生假單申請":
     st.header("📝 僑生外散宿申請單 (週報表整合模式)")
     user = st.session_state.current_user
     
+    overseas_classes = ["資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "餐一和", "餐一平", "資訊二孝"]
     target_class = st.selectbox("請選擇要操作的僑生班級", overseas_classes) if user["role"] == "管理員" else user["class"]
     class_students = df_students[df_students["班級"] == target_class].copy()
     
@@ -221,7 +239,6 @@ elif app_mode == "📝 僑生假單申請":
     else:
         class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
         
-        # --- 步驟 1：不斷加入購物車 ---
         with st.expander("第一步：設定假別並加入本週清單 (可重複分批加入)", expanded=True):
             selected_display = st.multiselect("選擇本次要設定的學生 (可多選)：", class_students["顯示名稱"].tolist())
             selected_data = class_students[class_students["顯示名稱"].isin(selected_display)]
@@ -264,18 +281,14 @@ elif app_mode == "📝 僑生假單申請":
                             "返校時間": "21:00點名" if l_type == "外宿" else l_time.strftime('%H:%M'),
                             "事由與細節": reason + (f" | {stay_loc}" if l_type == "外宿" else ""),
                             "親友資訊": stay_info if l_type == "外宿" else "-",
-                            # 用於寫入資料庫的原始欄位
                             "raw_start": str(start_dt), "raw_end": str(end_dt), "raw_reason": f"返校:{l_time.strftime('%H:%M')} / {reason}",
                             "raw_loc": stay_loc, "raw_info": stay_info
                         }
                         st.session_state.leave_cart.append(record)
                     st.success(f"✅ 已成功將 {len(selected_data)} 位學生加入清單！可繼續選擇其他學生設定不同假別。")
 
-        # --- 步驟 2：預覽購物車與正式送出 ---
         if len(st.session_state.leave_cart) > 0:
             st.markdown("### 🛒 本週申請總表預覽")
-            
-            # 整理要顯示在網頁上的 DataFrame
             df_cart = pd.DataFrame(st.session_state.leave_cart)
             display_cols = ["座號", "姓名", "類別", "起訖日期", "返校時間", "事由與細節", "親友資訊"]
             st.dataframe(df_cart[display_cols], use_container_width=True)
@@ -283,7 +296,6 @@ elif app_mode == "📝 僑生假單申請":
             col_send, col_clear = st.columns(2)
             with col_send:
                 if st.button("🚀 全班確認無誤，送出寫入並產製 PDF", type="primary", use_container_width=True):
-                    # 1. 寫入 GSheets
                     upload_rows = []
                     for r in st.session_state.leave_cart:
                         upload_rows.append([
@@ -293,7 +305,6 @@ elif app_mode == "📝 僑生假單申請":
                         ])
                     sheet_leave.append_rows(upload_rows)
                     
-                    # 2. 產製純淨 HTML 列印版
                     html_table_rows = ""
                     for r in st.session_state.leave_cart:
                         html_table_rows += f"<tr><td>{r['座號']}</td><td>{r['姓名']}</td><td>{r['類別']}</td><td>{r['起訖日期']}</td><td>{r['返校時間']}</td><td>{r['事由與細節']}<br>{r['親友資訊']}</td><td>{r['學生手機']}</td><td>{r['家長電話']}</td></tr>"
@@ -341,7 +352,7 @@ elif app_mode == "📝 僑生假單申請":
                     </html>
                     """
                     st.session_state.print_html = html_content
-                    st.session_state.leave_cart = [] # 送出後清空購物車
+                    st.session_state.leave_cart = [] 
                     st.success("✅ 資料已成功寫入資料庫！")
                     st.rerun()
                     
@@ -350,11 +361,9 @@ elif app_mode == "📝 僑生假單申請":
                     st.session_state.leave_cart = []
                     st.rerun()
 
-        # --- 步驟 3：渲染純淨的 PDF 列印畫面 ---
         if "print_html" in st.session_state:
             st.divider()
-            st.success("🎉 **產製成功！** 請點擊下方紅色按鈕，系統會彈出一個乾淨的列印視窗，不會印到任何網頁側邊欄！(強烈建議版面設定為**橫向**)")
-            # 使用 iframe 技術隔絕 Streamlit 本身的 UI
+            st.success("🎉 **產製成功！** 請點擊下方紅色按鈕開啟乾淨的列印視窗。(建議設定為橫向)")
             components.html(st.session_state.print_html, height=800, scrolling=True)
 
 # ==========================================
