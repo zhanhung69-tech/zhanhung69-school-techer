@@ -13,12 +13,21 @@ st.set_page_config(page_title="樹人家商-校園管理整合系統", layout="w
 tw_time = datetime.utcnow() + timedelta(hours=8)
 today_date = tw_time.strftime("%Y-%m-%d")
 
+# ==========================================
+# 系統共用常數 (班級清單與僑生專班)
+# ==========================================
 REAL_CLASS_LIST = {
     "一年級": ["商一忠", "資處一忠", "觀一忠", "觀一孝", "觀一仁", "餐一忠", "餐一孝", "餐一仁", "餐一愛", "餐一信", "餐一義", "餐一和", "餐一平", "幼一忠", "美一忠", "美一孝", "美一仁", "影一忠", "資訊一忠", "資訊一孝", "資訊一仁"],
     "二年級": ["商二忠", "資處二忠", "資處二孝", "觀二忠", "觀二孝", "餐二忠", "餐二孝", "餐二仁", "餐二愛", "餐二信", "餐二義", "餐二和", "幼二忠", "美二忠", "美二孝", "美二仁", "影二忠", "影二孝", "資訊二忠", "資訊二孝", "資訊二仁"],
     "三年級": ["商三忠", "電三忠", "資處三忠", "資處三孝", "觀三忠", "觀三孝", "觀三仁", "餐三忠", "餐三孝", "餐三仁", "餐三愛", "餐三信", "餐三義", "餐三和", "幼三忠", "幼三孝", "美三忠", "美三孝", "美三仁", "影三忠", "資訊三忠"]
 }
 
+# 🌟 僑生班級專屬名單 (用於權限過濾)
+OVERSEAS_CLASSES = ["餐一和", "餐一平", "資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "資訊二孝", "資訊二仁"]
+
+# ==========================================
+# 安全讀取引擎
+# ==========================================
 def safe_get_dataframe(sheet):
     if sheet is None: return pd.DataFrame()
     data = sheet.get_all_values()
@@ -120,7 +129,7 @@ for key in ["temp_records", "leave_cart", "reward_cart"]:
 if "current_user" not in st.session_state: st.session_state.current_user = None
 
 # ==========================================
-# 側邊欄：登入與權限控管
+# 側邊欄：登入與嚴密權限控管
 # ==========================================
 with st.sidebar:
     st.title("📂 系統選單")
@@ -157,12 +166,23 @@ with st.sidebar:
     menu_options = []
     if st.session_state.current_user:
         curr_role = st.session_state.current_user["role"]
-        if curr_role in ["學務主任", "教務主任", "生輔員", "行政", "管理員"]: menu_options.append("🔭 全校巡查登記")
-        if curr_role in ["導師", "管理員"]: 
+        curr_class = st.session_state.current_user["class"]
+        
+        # 1. 巡查登記：排除導師
+        if curr_role in ["學務主任", "教務主任", "生輔員", "行政", "管理員"]: 
+            menu_options.append("🔭 全校巡查登記")
+            
+        # 2. 僑生假單：🌟 嚴密限制 (僅限管理員，或被綁定為僑生班級的導師)
+        if curr_role == "管理員" or (curr_role == "導師" and curr_class in OVERSEAS_CLASSES): 
             menu_options.append("📝 僑生假單申請")
+            
+        # 3. 獎懲建議單：包含所有導師與行政人員
         if curr_role in ["導師", "行政", "生輔員", "學務主任", "教務主任", "管理員"]:
             menu_options.append("🏆 獎懲建議單申請")
-        if curr_role == "管理員": menu_options.append("📊 綜合數據中心 (管理員專屬)")
+            
+        # 4. 數據中心：僅限管理員
+        if curr_role == "管理員": 
+            menu_options.append("📊 綜合數據中心 (管理員專屬)")
             
     app_mode = st.radio("功能切換", menu_options if menu_options else ["🔒 系統已鎖定"])
 
@@ -245,8 +265,9 @@ if app_mode == "🔭 全校巡查登記":
 elif app_mode == "📝 僑生假單申請":
     st.header("📝 僑生外散宿申請單 (週報表整合模式)")
     user = st.session_state.current_user
-    overseas_classes = ["資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "餐一和", "餐一平", "資訊二孝"]
-    target_class = st.selectbox("請選擇要操作的班級", overseas_classes) if user["role"] == "管理員" else user["class"]
+    
+    # 限制選單選項與預設值
+    target_class = st.selectbox("請選擇要操作的班級", OVERSEAS_CLASSES) if user["role"] == "管理員" else user["class"]
     
     if not df_students.empty and "班級" in df_students.columns:
         class_students = df_students[df_students["班級"] == target_class].copy()
@@ -337,7 +358,7 @@ elif app_mode == "📝 僑生假單申請":
             components.html(st.session_state.print_leave_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組三：獎懲建議單申請 (移除表單凍結，實現即時連動)
+# 模組三：獎懲建議單申請
 # ==========================================
 elif app_mode == "🏆 獎懲建議單申請":
     st.header("🏆 獎懲建議單申請作業")
@@ -394,12 +415,10 @@ elif app_mode == "🏆 獎懲建議單申請":
 
     if not selected_students.empty:
         st.markdown("### 第二步：設定獎懲內容")
-        # 移除 st.form，讓下拉選單可以直接觸發網頁更新
         rc1, rc2, rc3 = st.columns([2, 4, 1])
         with rc1: 
             r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
         with rc2: 
-            # 這裡的事由會根據前面選擇的 r_type 即時連動更新了！
             r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新試算表"]))
         with rc3: 
             r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
@@ -412,7 +431,7 @@ elif app_mode == "🏆 獎懲建議單申請":
                     "獎懲項目": r_type, "事由": r_reason, "建議次數": r_count, "導師簽名": user["name"]
                 })
             st.success("✅ 已加入清單！")
-            st.rerun() # 自動重整網頁把清單顯示出來
+            st.rerun() 
 
     if len(st.session_state.reward_cart) > 0:
         st.markdown("### 🛒 待送出之獎懲建議清單 (跨班總結算)")
