@@ -59,7 +59,7 @@ try:
     sheet_rewards_log = ensure_sheet("獎懲紀錄總表", ["日期", "類別", "學號", "班級", "座號姓名", "獎懲項目", "事由", "建議次數", "導師簽名"])
     
 except Exception as e:
-    st.error("⚠️ 系統連線失敗，請檢查金鑰設定。")
+    st.error(f"⚠️ 系統連線失敗！真實錯誤原因： {e}")
     st.stop()
 
 # ==========================================
@@ -451,3 +451,4 @@ elif app_mode == "📊 綜合數據中心 (管理員專屬)":
                 csv = edited_rewards_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button("📥 下載完整獎懲總表 (CSV)", data=csv, file_name=f"獎懲紀錄總表_{today_date}.csv", use_container_width=True)
         else: st.info("尚無獎懲紀錄。")
+
