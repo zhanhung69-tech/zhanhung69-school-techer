@@ -3,9 +3,17 @@ import pandas as pd
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime, timedelta
 
-st.title("校園巡查登記系統 (全校名單連線版)")
+st.title("校園巡查登記系統 (權限控管與自動歸零版)")
 st.divider()
+
+# ==========================================
+# 取得台灣時間的「今天日期」
+# ==========================================
+# 雲端主機通常是世界協調時間 (UTC)，台灣時間要 +8 小時
+tw_time = datetime.utcnow() + timedelta(hours=8)
+today_date = tw_time.strftime("%Y-%m-%d")
 
 # ==========================================
 # 核心升級：連接 Google 試算表與自動抓取名單
@@ -22,30 +30,24 @@ def init_gspread():
 
 try:
     client = init_gspread()
-    # 打開學務處的總表
     doc = client.open("全校巡查總資料庫")
-    # 第一個分頁：用來存每天的巡查紀錄
     sheet_records = doc.sheet1 
     
+    # 防呆：如果表格是全空的，自動加上包含「日期」的新標題列
     if not sheet_records.row_values(1):
-        sheet_records.append_row(["時間", "對象", "班級", "座號", "學號", "姓名", "狀況", "得分", "回報人"])
+        sheet_records.append_row(["日期", "時間", "對象", "班級", "座號", "學號", "姓名", "狀況", "得分", "回報人"])
         
 except Exception as e:
     st.error("⚠️ 系統連線 Google 試算表失敗，請聯絡管理員確認金鑰設定。")
     st.stop()
 
-# --- 終極新功能：自動讀取真實學生名單 ---
-# @st.cache_data 會讓系統記住名單 10 分鐘，不用每次按按鈕都重新下載，提升系統速度
 @st.cache_data(ttl=600)
 def load_student_db():
     try:
-        # 尋找名為「學生名單」的第二個分頁
         sheet_students = doc.worksheet("學生名單")
         records = sheet_students.get_all_records()
-        
         db = {}
         for row in records:
-            # 確保學號是文字，並且去除不小心打到的空白鍵
             sid = str(row.get("學號", "")).strip()
             if sid:
                 db[sid] = {
@@ -55,9 +57,8 @@ def load_student_db():
                 }
         return db
     except Exception as e:
-        return {} # 如果還沒建立名單分頁，就先回傳空的字典防呆
+        return {} 
 
-# 正式將抓下來的雲端資料存入系統字典中
 student_db = load_student_db()
 
 # ==========================================
@@ -121,7 +122,6 @@ else:
         student_id, student_name, seat_num = "無", "無", "無"
         status = st.text_input("請輸入班級巡查狀況：")
     else:
-        # 如果尚未載入名單，給予提示
         if not student_db:
             st.warning("⚠️ 尚未偵測到雲端「學生名單」，目前個人違規功能可能無法正常查核學號。")
             
@@ -164,6 +164,7 @@ else:
                     score_num = 0
                     
             new_record = {
+                "日期": today_date,   # <--- 重點新增：標記今天日期
                 "時間": time_period,
                 "對象": "個人" if record_type == "個人違規紀錄" else "班級",
                 "班級": selected_class,
@@ -188,8 +189,9 @@ if len(st.session_state.temp_records) > 0:
         if st.button("🚀 確認無誤，全數寫入 Google 試算表", type="primary", use_container_width=True):
             upload_data = []
             for record in st.session_state.temp_records:
+                # 注意這裡多加了 record["日期"]
                 upload_data.append([
-                    record["時間"], record["對象"], record["班級"], record["座號"],
+                    record["日期"], record["時間"], record["對象"], record["班級"], record["座號"],
                     record["學號"], record["姓名"], record["狀況"], record["得分"], record["回報人"]
                 ])
             
@@ -204,14 +206,48 @@ if len(st.session_state.temp_records) > 0:
             st.rerun()
 
 # ==========================================
-# 4. 顯示全校共用總表
+# 4. 權限控管與顯示今日總表
 # ==========================================
 st.divider()
-st.subheader("📊 全校巡查總資料庫 (即時連線)")
 
-all_data = sheet_records.get_all_records()
+if st.session_state.current_user is not None:
+    # 判斷目前登入者的職稱（把 "生輔員-王大明" 切割出 "生輔員"）
+    current_role = st.session_state.current_user.split("-")[0]
+    
+    all_data = sheet_records.get_all_records()
 
-if len(all_data) > 0:
-    st.dataframe(pd.DataFrame(all_data), use_container_width=True)
+    if len(all_data) > 0:
+        df = pd.DataFrame(all_data)
+        
+        # 過濾出「只有今天」的資料 (只要過了晚上 12 點，today_date 改變，畫面就會自動歸零)
+        if "日期" in df.columns:
+            df_today = df[df["日期"] == today_date]
+        else:
+            df_today = pd.DataFrame() # 如果表單還沒更新日期欄位，先以空表處理
+        
+        if len(df_today) > 0:
+            # 依據職務決定能看到什麼資料
+            if current_role in ["管理員", "學務主任"]:
+                st.subheader("📊 管理員模式：全校今日巡查總表")
+                st.info("💡 您擁有最高權限，可檢視全校資料並下載報表。")
+                st.dataframe(df_today, use_container_width=True)
+                
+                # 下載按鈕只有管理員跟主任看得到
+                csv = df_today.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label="📥 下載今日巡查總表 (CSV 格式)",
+                    data=csv,
+                    file_name=f"{today_date}_今日巡查總表.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.subheader(f"📊 個人模式：您的今日巡查紀錄")
+                st.info("💡 為確保權限獨立，一般巡查人員僅能檢視自己回報的紀錄。")
+                # 只篩選出回報人是「自己」的紀錄
+                df_personal = df_today[df_today["回報人"] == st.session_state.current_user]
+                st.dataframe(df_personal, use_container_width=True)
+        else:
+            st.info("🟢 今日尚無任何巡查紀錄。")
 else:
-    st.info("目前的 Google 試算表尚無任何紀錄。")
+    st.info("🔒 請先在上方完成巡查人員報到，以檢視今日紀錄。")
