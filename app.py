@@ -6,18 +6,19 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
+# ==========================================
+# 頁面配置 & 台灣時間
+# ==========================================
 st.set_page_config(page_title="樹人家商-校園管理整合系統", layout="wide")
-
 tw_time = datetime.utcnow() + timedelta(hours=8)
 today_date = tw_time.strftime("%Y-%m-%d")
 
 # ==========================================
-# 安全讀取引擎 (終極防當機：自動修復空白或重複標題)
+# 安全讀取引擎
 # ==========================================
 def safe_get_dataframe(sheet):
     data = sheet.get_all_values()
-    if not data:
-        return pd.DataFrame()
+    if not data: return pd.DataFrame()
     headers = data[0]
     clean_headers = []
     for i, h in enumerate(headers):
@@ -25,8 +26,7 @@ def safe_get_dataframe(sheet):
         if not val: val = f"未命名欄位_{i}"
         while val in clean_headers: val += "_重複"
         clean_headers.append(val)
-    if len(data) > 1:
-        return pd.DataFrame(data[1:], columns=clean_headers)
+    if len(data) > 1: return pd.DataFrame(data[1:], columns=clean_headers)
     return pd.DataFrame(columns=clean_headers)
 
 # ==========================================
@@ -44,20 +44,22 @@ try:
     doc = client.open("全校巡查總資料庫")
     sheet_records = doc.sheet1  
     
-    try:
-        sheet_leave = doc.worksheet("僑生請假紀錄")
-    except:
-        sheet_leave = doc.add_worksheet(title="僑生請假紀錄", rows="2000", cols="12")
-        sheet_leave.append_row(["紀錄日期", "班級", "座號", "學號", "姓名", "類別", "起點日期", "迄止日期", "細節與時間", "外宿地點", "親友/關係/電話", "經辦人"])
-        
-    try:
-        sheet_accounts = doc.worksheet("系統帳號密碼")
-    except:
-        sheet_accounts = doc.add_worksheet(title="系統帳號密碼", rows="100", cols="5")
-        sheet_accounts.append_row(["帳號", "密碼", "職務", "姓名", "負責班級"])
-        sheet_accounts.append_row(["admin", "1234", "管理員", "展宏主任", "全校"])
+    # 確保所需分頁存在
+    def ensure_sheet(title, headers):
+        try:
+            return doc.worksheet(title)
+        except:
+            ws = doc.add_worksheet(title=title, rows="2000", cols="15")
+            ws.append_row(headers)
+            return ws
+
+    sheet_leave = ensure_sheet("僑生請假紀錄", ["紀錄日期", "班級", "座號", "學號", "姓名", "類別", "起點日期", "迄止日期", "細節與時間", "外宿地點", "親友/關係/電話", "經辦人"])
+    sheet_accounts = ensure_sheet("系統帳號密碼", ["帳號", "密碼", "職務", "姓名", "負責班級"])
+    sheet_rewards_db = ensure_sheet("獎懲條文", ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
+    sheet_rewards_log = ensure_sheet("獎懲紀錄總表", ["日期", "類別", "學號", "班級", "座號姓名", "獎懲項目", "事由", "建議次數", "導師簽名"])
+    
 except Exception as e:
-    st.error("⚠️ 系統連線失敗，請檢查金鑰或試算表名稱。")
+    st.error("⚠️ 系統連線失敗，請檢查金鑰設定。")
     st.stop()
 
 # ==========================================
@@ -65,26 +67,28 @@ except Exception as e:
 # ==========================================
 def load_data():
     try:
-        sheet_students = doc.worksheet("學生名單")
-        df_stu = safe_get_dataframe(sheet_students)
+        df_stu = safe_get_dataframe(doc.worksheet("學生名單"))
         for col in ['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話']:
             if col not in df_stu.columns: df_stu[col] = ""
         df_stu['學號'] = df_stu['學號'].astype(str).str.strip()
         df_stu['座號'] = df_stu['座號'].astype(str).str.zfill(2)
         
         df_acc = safe_get_dataframe(sheet_accounts)
-        if '帳號' in df_acc.columns and '密碼' in df_acc.columns:
+        if '帳號' in df_acc.columns:
             df_acc['帳號'] = df_acc['帳號'].astype(str).str.strip()
             df_acc['密碼'] = df_acc['密碼'].astype(str).str.strip()
-        return df_stu, df_acc
+            
+        df_rules = safe_get_dataframe(sheet_rewards_db)
+        return df_stu, df_acc, df_rules
     except Exception as e:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-df_students, df_accounts = load_data()
+df_students, df_accounts, df_rules = load_data()
 student_db = df_students.set_index('學號').to_dict('index') if not df_students.empty else {}
 
-if "temp_records" not in st.session_state: st.session_state.temp_records = []
-if "leave_cart" not in st.session_state: st.session_state.leave_cart = [] 
+# 記憶體初始化
+for key in ["temp_records", "leave_cart", "reward_cart"]:
+    if key not in st.session_state: st.session_state[key] = [] 
 if "current_user" not in st.session_state: st.session_state.current_user = None
 
 # ==========================================
@@ -92,39 +96,36 @@ if "current_user" not in st.session_state: st.session_state.current_user = None
 # ==========================================
 with st.sidebar:
     st.title("📂 系統選單")
-    
     if st.session_state.current_user is None:
         st.subheader("🔐 人員登入")
         login_user = st.text_input("請輸入帳號")
         login_pwd = st.text_input("請輸入密碼", type="password")
-        
         if st.button("登入系統", type="primary", use_container_width=True):
-            if login_user == "" or login_pwd == "":
-                st.error("⚠️ 帳號或密碼不可為空！")
-            elif df_accounts.empty:
-                st.error("⚠️ 系統尚未讀取到帳號庫，請確認『系統帳號密碼』分頁是否存在。")
+            if df_accounts.empty:
+                st.error("⚠️ 系統尚未讀取到帳號庫。")
             else:
                 match = df_accounts[(df_accounts['帳號'] == login_user) & (df_accounts['密碼'] == login_pwd)]
                 if not match.empty:
                     user_info = match.iloc[0]
-                    st.session_state.current_user = {"role": user_info.get('職務', '未設定'), "name": user_info.get('姓名', '未設定'), "class": user_info.get('負責班級', '全校')}
+                    st.session_state.current_user = {"role": user_info.get('職務', ''), "name": user_info.get('姓名', ''), "class": user_info.get('負責班級', '全校')}
                     st.rerun()
                 else:
                     st.error("❌ 帳號或密碼錯誤！")
     else:
         u = st.session_state.current_user
-        st.success(f"✅ 登入成功\n\n👤 姓名：{u['name']}\n🏷️ 職務：{u['role']}\n📍 權限：{u['class']}")
+        st.success(f"✅ 登入成功\n\n👤 {u['name']}\n🏷️ {u['role']}\n📍 {u['class']}")
         if st.button("🔄 登出系統", use_container_width=True):
             st.session_state.current_user = None
             st.rerun()
 
     st.divider()
-    
     menu_options = []
     if st.session_state.current_user:
         curr_role = st.session_state.current_user["role"]
         if curr_role in ["學務主任", "教務主任", "生輔員", "行政", "管理員"]: menu_options.append("🔭 全校巡查登記")
-        if curr_role in ["導師", "管理員"]: menu_options.append("📝 僑生假單申請")
+        if curr_role in ["導師", "管理員"]: 
+            menu_options.append("📝 僑生假單申請")
+            menu_options.append("🏆 獎懲建議單申請")
         if curr_role == "管理員": menu_options.append("📊 綜合數據中心 (管理員專屬)")
             
     app_mode = st.radio("功能切換", menu_options if menu_options else ["🔒 系統已鎖定"])
@@ -148,7 +149,7 @@ if app_mode == "🔭 全校巡查登記":
             }
             selected_class = st.selectbox("👉 再選班級", real_class_list[grade])
             
-        student_id, student_name, seat_num = "無", "無", "無"
+        student_id, student_name, seat_num = "-", "-", "-"
         status_category = st.selectbox("🎯 請選擇班級狀況", ["秩序良好 (+1)", "午休良好 (+1)", "導師入班 (+1)", "上課吵鬧/秩序不佳 (-1)", "午休吵鬧 (-1)", "環境髒亂 (-1)", "未節電 (-1)", "其他 (自行輸入)"])
         if status_category == "其他 (自行輸入)":
             status = st.text_input("請輸入補充說明：")
@@ -181,8 +182,8 @@ if app_mode == "🔭 全校巡查登記":
                 else: score_num = 0
 
     if st.button("➕ 加入下方暫存清單", use_container_width=True):
-        if record_type == "個人違規紀錄" and (len(student_id) != 6 or student_name == "未知" or student_name == "-"):
-            st.error("⚠️ 個人紀錄請務必輸入正確的 6 碼學號！")
+        if record_type == "個人違規紀錄" and (len(student_id) != 6 or student_name == "-"):
+            st.error("⚠️ 請務必輸入正確的學號！")
         else:
             st.session_state.temp_records.append({
                 "日期": today_date, "時間": time_period, "對象": "個人" if record_type == "個人違規紀錄" else "班級",
@@ -213,16 +214,17 @@ elif app_mode == "📝 僑生假單申請":
     st.header("📝 僑生外散宿申請單 (週報表整合模式)")
     user = st.session_state.current_user
     overseas_classes = ["資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "餐一和", "餐一平", "資訊二孝"]
-    target_class = st.selectbox("請選擇要操作的僑生班級", overseas_classes) if user["role"] == "管理員" else user["class"]
+    target_class = st.selectbox("請選擇要操作的班級", overseas_classes) if user["role"] == "管理員" else user["class"]
     class_students = df_students[df_students["班級"] == target_class].copy()
     
     if class_students.empty:
-        st.warning(f"名單資料庫中查無 {target_class} 的學生資料，請確認學生名單。")
+        st.warning(f"查無 {target_class} 的學生資料。")
     else:
         class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
-        with st.expander("第一步：設定假別並加入本週清單 (可重複分批加入)", expanded=True):
-            selected_display = st.multiselect("選擇本次要設定的學生 (可多選)：", class_students["顯示名稱"].tolist())
+        with st.expander("第一步：設定假別並加入本週清單", expanded=True):
+            selected_display = st.multiselect("選擇本次設定的學生：", class_students["顯示名稱"].tolist())
             selected_data = class_students[class_students["顯示名稱"].isin(selected_display)]
+            
             c1, c2 = st.columns(2)
             with c1:
                 l_type = st.selectbox("申請項目", ["晚歸", "外宿", "返鄉", "職場實習", "打工", "其他"])
@@ -231,15 +233,11 @@ elif app_mode == "📝 僑生假單申請":
                 end_dt = st.date_input("結束日期", value=tw_time)
                 l_time = st.time_input("預計返校時間", value=datetime.strptime("22:00", "%H:%M").time())
             
-            stay_info = ""
-            stay_loc = ""
-            time_valid = True
-            
+            stay_info, stay_loc, time_valid = "", "", True
             if l_type == "晚歸" and l_time > datetime.strptime("22:30", "%H:%M").time():
-                st.error("❌ 依規定，晚歸時間不得超過 22:30！請修正時間。")
+                st.error("❌ 晚歸時間不得超過 22:30！")
                 time_valid = False
             elif l_type == "外宿":
-                st.info("📌 提醒：外宿者請統一於返宿當日 21:00 參加點名。")
                 sc1, sc2, sc3, sc4 = st.columns(4)
                 with sc1: stay_loc = st.text_input("外宿地點")
                 with sc2: rel_name = st.text_input("親友姓名")
@@ -249,150 +247,207 @@ elif app_mode == "📝 僑生假單申請":
                 
             reason = st.text_input("事由補充說明")
             
-            if st.button("➕ 將以上設定加入本週整合清單", use_container_width=True) and time_valid:
-                if selected_data.empty:
-                    st.warning("請至少選擇一位學生！")
+            if st.button("➕ 加入本週整合清單", use_container_width=True) and time_valid:
+                if selected_data.empty: st.warning("請至少選擇一位學生！")
                 else:
                     for _, s in selected_data.iterrows():
-                        record = {
+                        st.session_state.leave_cart.append({
                             "班級": target_class, "座號": s.get('座號',''), "學號": s.get('學號',''), "姓名": s.get('姓名',''),
                             "學生手機": s.get('學生手機',''), "家長電話": s.get('家長聯絡電話',''), "類別": l_type, "起訖日期": f"{start_dt} ~ {end_dt}", 
                             "返校時間": "21:00點名" if l_type == "外宿" else l_time.strftime('%H:%M'),
                             "事由與細節": reason + (f" | {stay_loc}" if l_type == "外宿" else ""),
                             "親友資訊": stay_info if l_type == "外宿" else "-",
-                            "raw_start": str(start_dt), "raw_end": str(end_dt), "raw_reason": f"返校:{l_time.strftime('%H:%M')} / {reason}",
-                            "raw_loc": stay_loc, "raw_info": stay_info
-                        }
-                        st.session_state.leave_cart.append(record)
-                    st.success(f"✅ 已成功加入清單！")
+                            "raw_start": str(start_dt), "raw_end": str(end_dt), "raw_reason": f"返校:{l_time.strftime('%H:%M')} / {reason}", "raw_loc": stay_loc, "raw_info": stay_info
+                        })
+                    st.success("✅ 已加入清單！")
 
         if len(st.session_state.leave_cart) > 0:
-            st.markdown("### 🛒 本週申請總表預覽")
-            st.dataframe(pd.DataFrame(st.session_state.leave_cart)[["座號", "姓名", "類別", "起訖日期", "返校時間", "事由與細節", "親友資訊"]], use_container_width=True)
-            col_send, col_clear = st.columns(2)
-            with col_send:
-                if st.button("🚀 確認無誤，寫入並產製 PDF", type="primary", use_container_width=True):
-                    upload_rows = [[today_date, r['班級'], r['座號'], r['學號'], r['姓名'], r['類別'], r['raw_start'], r['raw_end'], r['raw_reason'], r['raw_loc'], r['raw_info'], user['name']] for r in st.session_state.leave_cart]
-                    sheet_leave.append_rows(upload_rows)
-                    html_table_rows = "".join([f"<tr><td>{r['座號']}</td><td>{r['姓名']}</td><td>{r['類別']}</td><td>{r['起訖日期']}</td><td>{r['返校時間']}</td><td>{r['事由與細節']}<br>{r['親友資訊']}</td><td>{r['學生手機']}</td><td>{r['家長電話']}</td></tr>" for r in st.session_state.leave_cart])
-                    html_content = f"""
+            st.markdown("### 🛒 假單總表預覽")
+            st.dataframe(pd.DataFrame(st.session_state.leave_cart)[["座號", "姓名", "類別", "起訖日期", "返校時間", "事由與細節"]], use_container_width=True)
+            col_s, col_c = st.columns(2)
+            with col_s:
+                if st.button("🚀 確認寫入並產製假單 PDF", type="primary", use_container_width=True):
+                    sheet_leave.append_rows([[today_date, r['班級'], r['座號'], r['學號'], r['姓名'], r['類別'], r['raw_start'], r['raw_end'], r['raw_reason'], r['raw_loc'], r['raw_info'], user['name']] for r in st.session_state.leave_cart])
+                    rows_html = "".join([f"<tr><td>{r['座號']}</td><td>{r['姓名']}</td><td>{r['類別']}</td><td>{r['起訖日期']}</td><td>{r['返校時間']}</td><td>{r['事由與細節']}<br>{r['親友資訊']}</td><td>{r['學生手機']}</td><td>{r['家長電話']}</td></tr>" for r in st.session_state.leave_cart])
+                    st.session_state.print_leave_html = f"""
                     <!DOCTYPE html><html><head><meta charset="utf-8"><style>
                         body {{ font-family: "Microsoft JhengHei", sans-serif; padding: 20px; }}
-                        @media print {{ #print-btn {{ display: none !important; }} @page {{ size: A4 landscape; margin: 15mm; }} }}
-                        #print-btn {{ margin-bottom: 20px; padding: 12px 24px; background: #FF4B4B; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 18px; font-weight: bold; width: 100%; }}
+                        @media print {{ #btn {{ display: none !important; }} @page {{ size: A4 landscape; margin: 15mm; }} }}
+                        #btn {{ margin-bottom: 20px; padding: 12px; background: #FF4B4B; color: white; border: none; width: 100%; font-size: 18px; font-weight: bold; cursor: pointer; }}
                         .title {{ text-align: center; font-size: 24px; font-weight: bold; margin-bottom: 20px; border-bottom: 2px solid black; padding-bottom: 10px; }}
-                        table {{ width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px; }} th, td {{ border: 1px solid black; padding: 8px; text-align: center; }} th {{ background-color: #f2f2f2; }}
-                        .sig-container {{ display: flex; justify-content: space-between; margin-top: 80px; }} .sig-box {{ text-align: center; width: 18%; font-weight: bold; font-size: 16px; }}
+                        table {{ width: 100%; border-collapse: collapse; font-size: 13px; }} th, td {{ border: 1px solid black; padding: 8px; text-align: center; }} th {{ background-color: #f2f2f2; }}
+                        .sig {{ display: flex; justify-content: space-between; margin-top: 80px; }} .box {{ text-align: center; width: 18%; font-weight: bold; font-size: 16px; }}
                     </style></head><body>
-                        <button id="print-btn" onclick="window.print()">🖨️ 點此開啟列印 (請選擇另存為 PDF)</button>
+                        <button id="btn" onclick="window.print()">🖨️ 點此列印 (請存為 PDF)</button>
                         <div class="title">樹人家商 {target_class} 僑生外散(宿)集體申請單</div>
-                        <table><thead><tr><th>座號</th><th>姓名</th><th>類別</th><th>申請日期</th><th>返校/宿時間</th><th>地點/事由/親友資訊</th><th>學生手機</th><th>家長電話</th></tr></thead><tbody>{html_table_rows}</tbody></table>
-                        <div class="sig-container"><div class="sig-box">導師<br><br><br></div><div class="sig-box">生輔組長<br><br><br></div><div class="sig-box">學務主任<br><br><br></div><div class="sig-box">國際交流組<br><br><br></div><div class="sig-box">招生中心<br><br><br></div></div>
+                        <table><thead><tr><th>座號</th><th>姓名</th><th>類別</th><th>申請日期</th><th>返校/宿時間</th><th>地點/事由/親友資訊</th><th>學生手機</th><th>家長電話</th></tr></thead><tbody>{rows_html}</tbody></table>
+                        <div class="sig"><div class="box">導師<br><br></div><div class="box">生輔組長<br><br></div><div class="box">學務主任<br><br></div><div class="box">國際交流組<br><br></div><div class="box">招生中心<br><br></div></div>
                     </body></html>
                     """
-                    st.session_state.print_html = html_content
                     st.session_state.leave_cart = [] 
                     st.rerun()
-            with col_clear:
+            with col_c:
                 if st.button("🗑️ 清空清單", use_container_width=True):
                     st.session_state.leave_cart = []
                     st.rerun()
 
-        if "print_html" in st.session_state:
+        if "print_leave_html" in st.session_state:
             st.divider()
-            components.html(st.session_state.print_html, height=800, scrolling=True)
+            components.html(st.session_state.print_leave_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組三：綜合數據中心
+# 模組三：獎懲建議單申請 (全新功能)
+# ==========================================
+elif app_mode == "🏆 獎懲建議單申請":
+    st.header("🏆 獎懲建議單申請作業")
+    user = st.session_state.current_user
+    
+    # 動態抓取獎懲類別與條文
+    rules_dict = {}
+    if not df_rules.empty:
+        for col in df_rules.columns:
+            # 過濾掉空白條文
+            rules_dict[col] = [r for r in df_rules[col].dropna().tolist() if str(r).strip() != ""]
+    
+    st.markdown("### 第一步：選擇學生")
+    input_mode = st.radio("作業模式", ["📌 本班學生 (下拉勾選)", "🔍 跨班新增 (輸入學號)"], horizontal=True)
+    
+    selected_students = pd.DataFrame()
+    
+    if input_mode == "📌 本班學生 (下拉勾選)":
+        if user["class"] == "全校":
+            st.warning("您目前為全校權限，請使用「跨班新增」模式輸入學號。")
+        else:
+            class_students = df_students[df_students["班級"] == user["class"]].copy()
+            if not class_students.empty:
+                class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
+                selected_display = st.multiselect("請勾選本班學生：", class_students["顯示名稱"].tolist())
+                selected_students = class_students[class_students["顯示名稱"].isin(selected_display)]
+            else:
+                st.error(f"查無 {user['class']} 學生資料。")
+    else:
+        search_id = st.text_input("請輸入學生學號 (限6碼)：").strip()
+        if len(search_id) == 6:
+            if search_id in student_db:
+                # 將查到的學生轉成 DataFrame 格式以利後續統一處理
+                st.success(f"✅ 查獲學生：{student_db[search_id]['班級']} {student_db[search_id]['姓名']}")
+                selected_students = pd.DataFrame([student_db[search_id]])
+            else:
+                st.error("⚠️ 查無此學號！")
+
+    if not selected_students.empty:
+        st.markdown("### 第二步：設定獎懲內容")
+        with st.form("reward_form", clear_on_submit=False):
+            rc1, rc2, rc3 = st.columns([2, 4, 1])
+            with rc1:
+                r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "警告", "小過"])
+            with rc2:
+                r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新"]))
+            with rc3:
+                r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
+                
+            if st.form_submit_button("➕ 加入獎懲建議清單", use_container_width=True):
+                for _, s in selected_students.iterrows():
+                    st.session_state.reward_cart.append({
+                        "類別": "獎勵" if r_type in ["嘉獎", "小功", "大功"] else "懲處",
+                        "學號": s['學號'], "班級": s['班級'], "座號姓名": f"{s['座號']}{s['姓名']}",
+                        "獎懲項目": r_type, "事由": r_reason, "建議次數": r_count, "導師簽名": user["name"]
+                    })
+                st.success("✅ 已加入清單！可繼續新增其他學生。")
+
+    if len(st.session_state.reward_cart) > 0:
+        st.markdown("### 🛒 待送出之獎懲建議清單")
+        df_cart = pd.DataFrame(st.session_state.reward_cart)
+        st.dataframe(df_cart, use_container_width=True)
+        
+        col_s, col_c = st.columns(2)
+        with col_s:
+            if st.button("🚀 確認無誤，寫入並產製 PDF 建議單", type="primary", use_container_width=True):
+                # 寫入資料庫
+                upload_rows = [[today_date, r['類別'], r['學號'], r['班級'], r['座號姓名'], r['獎懲項目'], r['事由'], r['建議次數'], r['導師簽名']] for r in st.session_state.reward_cart]
+                sheet_rewards_log.append_rows(upload_rows)
+                
+                # 產製 PDF HTML (依據獎勵或懲處分開顯示標題)
+                main_type = "獎勵" if st.session_state.reward_cart[0]['類別'] == "獎勵" else "懲處"
+                
+                rows_html = ""
+                for idx, r in enumerate(st.session_state.reward_cart):
+                    rows_html += f"<tr><td>{idx+1}</td><td>{r['學號']}</td><td>{r['班級']}</td><td>{r['座號姓名']}</td><td>{r['獎懲項目']}</td><td style='text-align:left;'>{r['事由']}</td><td>{r['建議次數']}</td><td>{r['導師簽名']}</td></tr>"
+                
+                st.session_state.print_reward_html = f"""
+                <!DOCTYPE html><html><head><meta charset="utf-8"><style>
+                    body {{ font-family: "Microsoft JhengHei", sans-serif; padding: 20px; }}
+                    @media print {{ #btn {{ display: none !important; }} @page {{ size: A4 portrait; margin: 15mm; }} }}
+                    #btn {{ margin-bottom: 20px; padding: 12px; background: #FF4B4B; color: white; border: none; width: 100%; font-size: 18px; font-weight: bold; cursor: pointer; }}
+                    .title {{ text-align: center; font-size: 24px; font-weight: bold; margin-bottom: 5px; }}
+                    .subtitle {{ text-align: right; font-size: 14px; margin-bottom: 10px; }}
+                    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }} 
+                    th, td {{ border: 1px solid black; padding: 10px; text-align: center; }} 
+                    th {{ background-color: #f2f2f2; }}
+                    .sig {{ display: flex; justify-content: space-between; margin-top: 60px; }} 
+                    .box {{ text-align: center; width: 22%; font-weight: bold; font-size: 16px; border-top: 1px dotted black; padding-top: 10px; }}
+                </style></head><body>
+                    <button id="btn" onclick="window.print()">🖨️ 點此列印 {main_type}建議單</button>
+                    <div class="title">新北市私立樹人家商{main_type}建議單</div>
+                    <div class="subtitle">造冊日期：{today_date}</div>
+                    <table><thead><tr><th width="5%">項次</th><th width="12%">學號</th><th width="12%">班級</th><th width="12%">座號姓名</th><th width="10%">類別</th><th width="35%">獎懲事由</th><th width="7%">建議</th><th width="7%">導師</th></tr></thead><tbody>{rows_html}</tbody></table>
+                    <div class="sig"><div class="box">簽辦人</div><div class="box">輔導教官</div><div class="box">主任教官</div><div class="box">學務主任</div></div>
+                </body></html>
+                """
+                st.session_state.reward_cart = [] 
+                st.rerun()
+        with col_c:
+            if st.button("🗑️ 清空清單", use_container_width=True):
+                st.session_state.reward_cart = []
+                st.rerun()
+
+    if "print_reward_html" in st.session_state:
+        st.divider()
+        components.html(st.session_state.print_reward_html, height=800, scrolling=True)
+
+# ==========================================
+# 模組四：綜合數據中心
 # ==========================================
 elif app_mode == "📊 綜合數據中心 (管理員專屬)":
     st.header("📊 綜合數據中心")
     if "current_user" not in st.session_state or st.session_state.current_user is None: st.stop()
         
-    tab1, tab2, tab3 = st.tabs(["🔥 巡查資料庫維護", "✈️ 僑生假單總表", "🖨️ 產製今日呈核報表"])
+    tab1, tab2, tab3 = st.tabs(["🔥 巡查資料庫維護", "✈️ 僑生假單總表", "🏆 獎懲紀錄總表"])
     
     with tab1:
-        st.subheader("巡查紀錄維護 (可直接點擊表格修改/刪除)")
+        st.subheader("巡查紀錄維護")
         df_patrol = safe_get_dataframe(sheet_records)
         if not df_patrol.empty:
             edited_df = st.data_editor(df_patrol, num_rows="dynamic", use_container_width=True, height=400)
-            if st.button("💾 儲存修改至雲端", type="primary"):
+            if st.button("💾 儲存巡查修改", type="primary"):
                 sheet_records.clear()
                 sheet_records.update(values=[edited_df.columns.tolist()] + edited_df.values.tolist(), range_name='A1')
-                st.success("✅ 資料庫已成功更新！")
-        else:
-            st.info("尚無巡查紀錄。")
+                st.success("✅ 資料庫已更新！")
+        else: st.info("無紀錄。")
             
     with tab2:
-        st.subheader("僑生請假/外散宿總表維護")
+        st.subheader("僑生請假總表")
         df_leave = safe_get_dataframe(sheet_leave)
         if not df_leave.empty:
             edited_leave_df = st.data_editor(df_leave, num_rows="dynamic", use_container_width=True, height=400)
-            col_l1, col_l2 = st.columns(2)
-            with col_l1:
-                if st.button("💾 儲存假單修改至雲端", type="primary"):
-                    sheet_leave.clear()
-                    sheet_leave.update(values=[edited_leave_df.columns.tolist()] + edited_leave_df.values.tolist(), range_name='A1')
-                    st.success("✅ 假單資料庫已更新！")
-            with col_l2:
-                csv = edited_leave_df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載完整假單總表 (CSV)", data=csv, file_name=f"僑生請假紀錄_{today_date}.csv", use_container_width=True)
-        else:
-            st.info("尚無請假紀錄。")
-            
+            if st.button("💾 儲存假單修改", type="primary"):
+                sheet_leave.clear()
+                sheet_leave.update(values=[edited_leave_df.columns.tolist()] + edited_leave_df.values.tolist(), range_name='A1')
+                st.success("✅ 資料庫已更新！")
+        else: st.info("無紀錄。")
+
     with tab3:
-        st.subheader("🖨️ 產製今日巡查呈核報表 (紙本用印)")
-        df_patrol = safe_get_dataframe(sheet_records)
-        if not df_patrol.empty and '日期' in df_patrol.columns:
-            df_today = df_patrol[df_patrol['日期'] == today_date]
-            if not df_today.empty:
-                df_class = df_today[(df_today['對象'] == '班級') & (~df_today['時間'].str.contains('午休', na=False, regex=False))]
-                df_noon = df_today[(df_today['對象'] == '班級') & (df_today['時間'].str.contains('午休', na=False, regex=False))]
-                df_personal = df_today[df_today['對象'] == '個人']
-                
-                def df_to_html(df, cols):
-                    if df.empty: return "<tr><td colspan='10'>無紀錄</td></tr>"
-                    html = ""
-                    for _, r in df.iterrows():
-                        html += "<tr>" + "".join([f"<td>{r.get(c, '')}</td>" for c in cols]) + "</tr>"
-                    return html
-                
-                cols_class = ['時間', '班級', '狀況', '得分', '回報人']
-                cols_personal = ['時間', '班級', '學號', '姓名', '狀況', '得分', '回報人']
-                
-                report_html = f"""
-                <!DOCTYPE html><html><head><meta charset="utf-8"><style>
-                    body {{ font-family: "Microsoft JhengHei", sans-serif; padding: 20px; }}
-                    @media print {{ #print-btn-report {{ display: none !important; }} @page {{ size: A4 portrait; margin: 15mm; }} }}
-                    #print-btn-report {{ margin-bottom: 20px; padding: 12px 24px; background: #FF4B4B; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 18px; font-weight: bold; width: 100%; }}
-                    .title {{ text-align: center; font-size: 24px; font-weight: bold; margin-bottom: 20px; border-bottom: 2px solid black; padding-bottom: 10px; }}
-                    h3 {{ margin-top: 20px; margin-bottom: 5px; font-size: 16px; border-left: 4px solid #333; padding-left: 10px; }}
-                    table {{ width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 13px; }} 
-                    th, td {{ border: 1px solid black; padding: 6px; text-align: center; }} th {{ background-color: #e0e0e0; }}
-                    .sig-container {{ display: flex; justify-content: space-between; margin-top: 60px; }} 
-                    .sig-box {{ text-align: center; width: 22%; font-weight: bold; font-size: 16px; border-top: 1px dashed gray; padding-top: 10px; }}
-                </style></head><body>
-                    <button id="print-btn-report" onclick="window.print()">🖨️ 點此開啟列印呈核報表</button>
-                    <div class="title">樹人家商 每日校園巡查呈核紀錄表</div>
-                    <div style="text-align: right; margin-bottom: 10px;">報表日期：{today_date}</div>
-                    
-                    <h3>一、 上課巡查紀錄</h3>
-                    <table><thead><tr><th>時間</th><th>班級</th><th>狀況</th><th>加扣分</th><th>回報人</th></tr></thead><tbody>{df_to_html(df_class, cols_class)}</tbody></table>
-                    
-                    <h3>二、 午間巡查紀錄</h3>
-                    <table><thead><tr><th>時間</th><th>班級</th><th>狀況</th><th>加扣分</th><th>回報人</th></tr></thead><tbody>{df_to_html(df_noon, cols_class)}</tbody></table>
-                    
-                    <h3>三、 當日違規學生名單</h3>
-                    <table><thead><tr><th>時間</th><th>班級</th><th>學號</th><th>姓名</th><th>違規狀況</th><th>加扣分</th><th>回報人</th></tr></thead><tbody>{df_to_html(df_personal, cols_personal)}</tbody></table>
-                    
-                    <div class="sig-container">
-                        <div class="sig-box">承辦人</div>
-                        <div class="sig-box">學務處主管</div>
-                        <div class="sig-box">教務處主管</div>
-                        <div class="sig-box">校長</div>
-                    </div>
-                </body></html>
-                """
-                components.html(report_html, height=800, scrolling=True)
-            else:
-                st.info("🟢 今日尚無任何巡查紀錄，無需產製報表。")
+        st.subheader("全校獎懲建議紀錄表")
+        df_rewards = safe_get_dataframe(sheet_rewards_log)
+        if not df_rewards.empty:
+            edited_rewards_df = st.data_editor(df_rewards, num_rows="dynamic", use_container_width=True, height=400)
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                if st.button("💾 儲存獎懲修改", type="primary"):
+                    sheet_rewards_log.clear()
+                    sheet_rewards_log.update(values=[edited_rewards_df.columns.tolist()] + edited_rewards_df.values.tolist(), range_name='A1')
+                    st.success("✅ 獎懲資料庫已更新！")
+            with col_r2:
+                csv = edited_rewards_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 下載完整獎懲總表 (CSV)", data=csv, file_name=f"獎懲紀錄總表_{today_date}.csv", use_container_width=True)
+        else: st.info("尚無獎懲紀錄。")
