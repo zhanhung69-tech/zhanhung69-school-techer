@@ -49,16 +49,14 @@ def load_static_data():
     client = init_gspread()
     doc = client.open("全校巡查總資料庫")
     
-    # 讀取學生名單 (增加多重名稱辨識容錯)
+    # 讀取學生名單
     try:
         try:
             ws_stu = doc.worksheet("學生名單")
         except:
-            ws_stu = doc.worksheet("基本資料庫") # 容許您命名為基本資料庫
+            ws_stu = doc.worksheet("基本資料庫") 
             
         df_stu = safe_get_dataframe(ws_stu)
-        
-        # 清理欄位空白並智慧更名
         df_stu.columns = df_stu.columns.str.strip()
         rename_map = {"班級名稱": "班級", "手機號碼": "學生手機", "家長電話": "家長聯絡電話"}
         df_stu.rename(columns=rename_map, inplace=True)
@@ -68,7 +66,6 @@ def load_static_data():
         df_stu['學號'] = df_stu['學號'].astype(str).str.strip()
         df_stu['座號'] = df_stu['座號'].astype(str).str.zfill(2)
     except: 
-        # 終極防當機：若完全讀不到，直接塞給系統標準空欄位，杜絕 KeyError
         df_stu = pd.DataFrame(columns=['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話'])
     
     # 讀取帳號密碼
@@ -146,10 +143,9 @@ with st.sidebar:
         u = st.session_state.current_user
         st.success(f"✅ 登入成功\n\n👤 {u['name']}\n🏷️ {u['role']}\n📍 {u['class']}")
         
-        # 強制重整雲端資料庫按鈕，解決快取不同步
         if u["role"] == "管理員":
             if st.button("🔄 強制重整雲端資料庫", use_container_width=True):
-                st.cache_data.clear() # 徹底清除快取重抓
+                st.cache_data.clear() 
                 st.success("✅ 資料庫已重新同步！")
                 st.rerun()
                 
@@ -252,14 +248,13 @@ elif app_mode == "📝 僑生假單申請":
     overseas_classes = ["資訊一孝", "資訊一仁", "觀一孝", "觀一仁", "餐一和", "餐一平", "資訊二孝"]
     target_class = st.selectbox("請選擇要操作的班級", overseas_classes) if user["role"] == "管理員" else user["class"]
     
-    # 【防錯機制】確認 Dataframe 有「班級」欄位才去篩選
     if not df_students.empty and "班級" in df_students.columns:
         class_students = df_students[df_students["班級"] == target_class].copy()
     else:
         class_students = pd.DataFrame()
     
     if class_students.empty:
-        st.warning(f"⚠️ 雲端名單資料庫中查無 {target_class} 的學生資料。請管理員確認試算表『學生名單』分頁是否包含『班級』欄位。")
+        st.warning(f"⚠️ 雲端名單資料庫中查無 {target_class} 的學生資料。")
     else:
         class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
         with st.expander("第一步：設定假別並加入本週清單", expanded=True):
@@ -301,6 +296,7 @@ elif app_mode == "📝 僑生假單申請":
                             "raw_start": str(start_dt), "raw_end": str(end_dt), "raw_reason": f"返校:{l_time.strftime('%H:%M')} / {reason}", "raw_loc": stay_loc, "raw_info": stay_info
                         })
                     st.success("✅ 已加入清單！")
+                    st.rerun()
 
         if len(st.session_state.leave_cart) > 0:
             st.markdown("### 🛒 假單總表預覽")
@@ -341,7 +337,7 @@ elif app_mode == "📝 僑生假單申請":
             components.html(st.session_state.print_leave_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組三：獎懲建議單申請
+# 模組三：獎懲建議單申請 (移除表單凍結，實現即時連動)
 # ==========================================
 elif app_mode == "🏆 獎懲建議單申請":
     st.header("🏆 獎懲建議單申請作業")
@@ -398,20 +394,25 @@ elif app_mode == "🏆 獎懲建議單申請":
 
     if not selected_students.empty:
         st.markdown("### 第二步：設定獎懲內容")
-        with st.form("reward_form", clear_on_submit=False):
-            rc1, rc2, rc3 = st.columns([2, 4, 1])
-            with rc1: r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
-            with rc2: r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新試算表"]))
-            with rc3: r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
-                
-            if st.form_submit_button("➕ 將以上設定加入下方建議清單", use_container_width=True):
-                for _, s in selected_students.iterrows():
-                    st.session_state.reward_cart.append({
-                        "類別": "獎勵" if r_type in ["嘉獎", "小功", "大功"] else "懲處",
-                        "學號": s['學號'], "班級": s['班級'], "座號姓名": f"{s.get('座號','')}{s.get('姓名','')}",
-                        "獎懲項目": r_type, "事由": r_reason, "建議次數": r_count, "導師簽名": user["name"]
-                    })
-                st.success("✅ 已加入清單！")
+        # 移除 st.form，讓下拉選單可以直接觸發網頁更新
+        rc1, rc2, rc3 = st.columns([2, 4, 1])
+        with rc1: 
+            r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
+        with rc2: 
+            # 這裡的事由會根據前面選擇的 r_type 即時連動更新了！
+            r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新試算表"]))
+        with rc3: 
+            r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
+            
+        if st.button("➕ 將以上設定加入下方建議清單", use_container_width=True):
+            for _, s in selected_students.iterrows():
+                st.session_state.reward_cart.append({
+                    "類別": "獎勵" if r_type in ["嘉獎", "小功", "大功"] else "懲處",
+                    "學號": s['學號'], "班級": s['班級'], "座號姓名": f"{s.get('座號','')}{s.get('姓名','')}",
+                    "獎懲項目": r_type, "事由": r_reason, "建議次數": r_count, "導師簽名": user["name"]
+                })
+            st.success("✅ 已加入清單！")
+            st.rerun() # 自動重整網頁把清單顯示出來
 
     if len(st.session_state.reward_cart) > 0:
         st.markdown("### 🛒 待送出之獎懲建議清單 (跨班總結算)")
