@@ -14,6 +14,15 @@ tw_time = datetime.utcnow() + timedelta(hours=8)
 today_date = tw_time.strftime("%Y-%m-%d")
 
 # ==========================================
+# 全校真實班級清單 (共用字典)
+# ==========================================
+REAL_CLASS_LIST = {
+    "一年級": ["商一忠", "資處一忠", "觀一忠", "觀一孝", "觀一仁", "餐一忠", "餐一孝", "餐一仁", "餐一愛", "餐一信", "餐一義", "餐一和", "餐一平", "幼一忠", "美一忠", "美一孝", "美一仁", "影一忠", "資訊一忠", "資訊一孝", "資訊一仁"],
+    "二年級": ["商二忠", "資處二忠", "資處二孝", "觀二忠", "觀二孝", "餐二忠", "餐二孝", "餐二仁", "餐二愛", "餐二信", "餐二義", "餐二和", "幼二忠", "美二忠", "美二孝", "美二仁", "影二忠", "影二孝", "資訊二忠", "資訊二孝", "資訊二仁"],
+    "三年級": ["商三忠", "電三忠", "資處三忠", "資處三孝", "觀三忠", "觀三孝", "觀三仁", "餐三忠", "餐三孝", "餐三仁", "餐三愛", "餐三信", "餐三義", "餐三和", "幼三忠", "幼三孝", "美三忠", "美三孝", "美三仁", "影三忠", "資訊三忠"]
+}
+
+# ==========================================
 # 安全讀取引擎
 # ==========================================
 def safe_get_dataframe(sheet):
@@ -125,6 +134,7 @@ with st.sidebar:
         if curr_role in ["學務主任", "教務主任", "生輔員", "行政", "管理員"]: menu_options.append("🔭 全校巡查登記")
         if curr_role in ["導師", "管理員"]: 
             menu_options.append("📝 僑生假單申請")
+        if curr_role in ["導師", "行政", "生輔員", "學務主任", "教務主任", "管理員"]:
             menu_options.append("🏆 獎懲建議單申請")
         if curr_role == "管理員": menu_options.append("📊 綜合數據中心 (管理員專屬)")
             
@@ -141,13 +151,7 @@ if app_mode == "🔭 全校巡查登記":
     if record_type == "班級整體表現":
         col1, col2 = st.columns(2)
         with col1: grade = st.selectbox("👉 先選年級", ["一年級", "二年級", "三年級"])
-        with col2:
-            real_class_list = {
-                "一年級": ["商一忠", "資處一忠", "觀一忠", "觀一孝", "觀一仁", "餐一忠", "餐一孝", "餐一仁", "餐一愛", "餐一信", "餐一義", "餐一和", "餐一平", "幼一忠", "美一忠", "美一孝", "美一仁", "影一忠", "資訊一忠", "資訊一孝", "資訊一仁"],
-                "二年級": ["商二忠", "資處二忠", "資處二孝", "觀二忠", "觀二孝", "餐二忠", "餐二孝", "餐二仁", "餐二愛", "餐二信", "餐二義", "餐二和", "幼二忠", "美二忠", "美二孝", "美二仁", "影二忠", "影二孝", "資訊二忠", "資訊二孝", "資訊二仁"],
-                "三年級": ["商三忠", "電三忠", "資處三忠", "資處三孝", "觀三忠", "觀三孝", "觀三仁", "餐三忠", "餐三孝", "餐三仁", "餐三愛", "餐三信", "餐三義", "餐三和", "幼三忠", "幼三孝", "美三忠", "美三孝", "美三仁", "影三忠", "資訊三忠"]
-            }
-            selected_class = st.selectbox("👉 再選班級", real_class_list[grade])
+        with col2: selected_class = st.selectbox("👉 再選班級", REAL_CLASS_LIST[grade])
             
         student_id, student_name, seat_num = "-", "-", "-"
         status_category = st.selectbox("🎯 請選擇班級狀況", ["秩序良好 (+1)", "午休良好 (+1)", "導師入班 (+1)", "上課吵鬧/秩序不佳 (-1)", "午休吵鬧 (-1)", "環境髒亂 (-1)", "未節電 (-1)", "其他 (自行輸入)"])
@@ -296,7 +300,7 @@ elif app_mode == "📝 僑生假單申請":
             components.html(st.session_state.print_leave_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組三：獎懲建議單申請 (全新功能)
+# 模組三：獎懲建議單申請 (含三種搜尋模式)
 # ==========================================
 elif app_mode == "🏆 獎懲建議單申請":
     st.header("🏆 獎懲建議單申請作業")
@@ -306,17 +310,17 @@ elif app_mode == "🏆 獎懲建議單申請":
     rules_dict = {}
     if not df_rules.empty:
         for col in df_rules.columns:
-            # 過濾掉空白條文
             rules_dict[col] = [r for r in df_rules[col].dropna().tolist() if str(r).strip() != ""]
     
     st.markdown("### 第一步：選擇學生")
-    input_mode = st.radio("作業模式", ["📌 本班學生 (下拉勾選)", "🔍 跨班新增 (輸入學號)"], horizontal=True)
+    # 升級：增加「依年級/班級搜尋」模式，造福行政同仁
+    input_mode = st.radio("作業模式", ["📌 本班學生 (下拉勾選)", "🏫 依年級/班級搜尋 (跨班利器)", "🔍 輸入學號搜尋"], horizontal=True)
     
     selected_students = pd.DataFrame()
     
     if input_mode == "📌 本班學生 (下拉勾選)":
         if user["class"] == "全校":
-            st.warning("您目前為全校權限，請使用「跨班新增」模式輸入學號。")
+            st.warning("💡 您目前為全校權限(非班級導師)，請使用「依年級/班級搜尋」或「輸入學號」模式。")
         else:
             class_students = df_students[df_students["班級"] == user["class"]].copy()
             if not class_students.empty:
@@ -325,38 +329,54 @@ elif app_mode == "🏆 獎懲建議單申請":
                 selected_students = class_students[class_students["顯示名稱"].isin(selected_display)]
             else:
                 st.error(f"查無 {user['class']} 學生資料。")
-    else:
+                
+    elif input_mode == "🏫 依年級/班級搜尋 (跨班利器)":
+        col_g, col_c = st.columns(2)
+        with col_g:
+            search_grade = st.selectbox("👉 1. 選擇年級", ["一年級", "二年級", "三年級"])
+        with col_c:
+            search_class = st.selectbox("👉 2. 選擇班級", REAL_CLASS_LIST[search_grade])
+            
+        class_students = df_students[df_students["班級"] == search_class].copy()
+        if not class_students.empty:
+            class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
+            selected_display = st.multiselect(f"👉 3. 請勾選 {search_class} 學生 (可多選)：", class_students["顯示名稱"].tolist())
+            selected_students = class_students[class_students["顯示名稱"].isin(selected_display)]
+        else:
+            st.warning(f"名單資料庫中查無 {search_class} 的學生資料。")
+            
+    else: # 🔍 輸入學號搜尋
         search_id = st.text_input("請輸入學生學號 (限6碼)：").strip()
         if len(search_id) == 6:
             if search_id in student_db:
-                # 將查到的學生轉成 DataFrame 格式以利後續統一處理
                 st.success(f"✅ 查獲學生：{student_db[search_id]['班級']} {student_db[search_id]['姓名']}")
                 selected_students = pd.DataFrame([student_db[search_id]])
             else:
                 st.error("⚠️ 查無此學號！")
 
+    # --- 進入第二步 ---
     if not selected_students.empty:
         st.markdown("### 第二步：設定獎懲內容")
         with st.form("reward_form", clear_on_submit=False):
             rc1, rc2, rc3 = st.columns([2, 4, 1])
             with rc1:
-                r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "警告", "小過"])
+                r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
             with rc2:
-                r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新"]))
+                r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新試算表"]))
             with rc3:
                 r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
                 
-            if st.form_submit_button("➕ 加入獎懲建議清單", use_container_width=True):
+            if st.form_submit_button("➕ 將以上設定加入下方建議清單", use_container_width=True):
                 for _, s in selected_students.iterrows():
                     st.session_state.reward_cart.append({
                         "類別": "獎勵" if r_type in ["嘉獎", "小功", "大功"] else "懲處",
                         "學號": s['學號'], "班級": s['班級'], "座號姓名": f"{s['座號']}{s['姓名']}",
                         "獎懲項目": r_type, "事由": r_reason, "建議次數": r_count, "導師簽名": user["name"]
                     })
-                st.success("✅ 已加入清單！可繼續新增其他學生。")
+                st.success("✅ 已加入清單！您可以切換班級繼續新增其他學生的獎懲。")
 
     if len(st.session_state.reward_cart) > 0:
-        st.markdown("### 🛒 待送出之獎懲建議清單")
+        st.markdown("### 🛒 待送出之獎懲建議清單 (跨班總結算)")
         df_cart = pd.DataFrame(st.session_state.reward_cart)
         st.dataframe(df_cart, use_container_width=True)
         
@@ -390,7 +410,7 @@ elif app_mode == "🏆 獎懲建議單申請":
                     <button id="btn" onclick="window.print()">🖨️ 點此列印 {main_type}建議單</button>
                     <div class="title">新北市私立樹人家商{main_type}建議單</div>
                     <div class="subtitle">造冊日期：{today_date}</div>
-                    <table><thead><tr><th width="5%">項次</th><th width="12%">學號</th><th width="12%">班級</th><th width="12%">座號姓名</th><th width="10%">類別</th><th width="35%">獎懲事由</th><th width="7%">建議</th><th width="7%">導師</th></tr></thead><tbody>{rows_html}</tbody></table>
+                    <table><thead><tr><th width="5%">項次</th><th width="12%">學號</th><th width="12%">班級</th><th width="12%">座號姓名</th><th width="10%">類別</th><th width="35%">獎懲事由</th><th width="7%">建議</th><th width="7%">簽名</th></tr></thead><tbody>{rows_html}</tbody></table>
                     <div class="sig"><div class="box">簽辦人</div><div class="box">輔導教官</div><div class="box">主任教官</div><div class="box">學務主任</div></div>
                 </body></html>
                 """
@@ -451,4 +471,3 @@ elif app_mode == "📊 綜合數據中心 (管理員專屬)":
                 csv = edited_rewards_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button("📥 下載完整獎懲總表 (CSV)", data=csv, file_name=f"獎懲紀錄總表_{today_date}.csv", use_container_width=True)
         else: st.info("尚無獎懲紀錄。")
-
