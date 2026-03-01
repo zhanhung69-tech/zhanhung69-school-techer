@@ -6,16 +6,28 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 
-# ==========================================
-# 頁面配置
-# ==========================================
 st.set_page_config(page_title="樹人家商-校園管理整合系統", layout="wide")
 
-# ==========================================
-# 取得台灣時間
-# ==========================================
 tw_time = datetime.utcnow() + timedelta(hours=8)
 today_date = tw_time.strftime("%Y-%m-%d")
+
+# ==========================================
+# 安全讀取引擎 (終極防當機：自動修復空白或重複標題)
+# ==========================================
+def safe_get_dataframe(sheet):
+    data = sheet.get_all_values()
+    if not data:
+        return pd.DataFrame()
+    headers = data[0]
+    clean_headers = []
+    for i, h in enumerate(headers):
+        val = str(h).strip()
+        if not val: val = f"未命名欄位_{i}"
+        while val in clean_headers: val += "_重複"
+        clean_headers.append(val)
+    if len(data) > 1:
+        return pd.DataFrame(data[1:], columns=clean_headers)
+    return pd.DataFrame(columns=clean_headers)
 
 # ==========================================
 # 連接 Google 試算表
@@ -44,9 +56,8 @@ try:
         sheet_accounts = doc.add_worksheet(title="系統帳號密碼", rows="100", cols="5")
         sheet_accounts.append_row(["帳號", "密碼", "職務", "姓名", "負責班級"])
         sheet_accounts.append_row(["admin", "1234", "管理員", "展宏主任", "全校"])
-        
 except Exception as e:
-    st.error("⚠️ 系統連線失敗，請檢查金鑰設定。")
+    st.error("⚠️ 系統連線失敗，請檢查金鑰或試算表名稱。")
     st.stop()
 
 # ==========================================
@@ -55,23 +66,23 @@ except Exception as e:
 def load_data():
     try:
         sheet_students = doc.worksheet("學生名單")
-        df_stu = pd.DataFrame(sheet_students.get_all_records())
+        df_stu = safe_get_dataframe(sheet_students)
         for col in ['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話']:
             if col not in df_stu.columns: df_stu[col] = ""
         df_stu['學號'] = df_stu['學號'].astype(str).str.strip()
         df_stu['座號'] = df_stu['座號'].astype(str).str.zfill(2)
         
-        df_acc = pd.DataFrame(sheet_accounts.get_all_records())
-        df_acc['帳號'] = df_acc['帳號'].astype(str).str.strip()
-        df_acc['密碼'] = df_acc['密碼'].astype(str).str.strip()
+        df_acc = safe_get_dataframe(sheet_accounts)
+        if '帳號' in df_acc.columns and '密碼' in df_acc.columns:
+            df_acc['帳號'] = df_acc['帳號'].astype(str).str.strip()
+            df_acc['密碼'] = df_acc['密碼'].astype(str).str.strip()
         return df_stu, df_acc
-    except:
+    except Exception as e:
         return pd.DataFrame(), pd.DataFrame()
 
 df_students, df_accounts = load_data()
 student_db = df_students.set_index('學號').to_dict('index') if not df_students.empty else {}
 
-# 記憶體初始化
 if "temp_records" not in st.session_state: st.session_state.temp_records = []
 if "leave_cart" not in st.session_state: st.session_state.leave_cart = [] 
 if "current_user" not in st.session_state: st.session_state.current_user = None
@@ -90,11 +101,13 @@ with st.sidebar:
         if st.button("登入系統", type="primary", use_container_width=True):
             if login_user == "" or login_pwd == "":
                 st.error("⚠️ 帳號或密碼不可為空！")
+            elif df_accounts.empty:
+                st.error("⚠️ 系統尚未讀取到帳號庫，請確認『系統帳號密碼』分頁是否存在。")
             else:
                 match = df_accounts[(df_accounts['帳號'] == login_user) & (df_accounts['密碼'] == login_pwd)]
                 if not match.empty:
                     user_info = match.iloc[0]
-                    st.session_state.current_user = {"role": user_info['職務'], "name": user_info['姓名'], "class": user_info['負責班級']}
+                    st.session_state.current_user = {"role": user_info.get('職務', '未設定'), "name": user_info.get('姓名', '未設定'), "class": user_info.get('負責班級', '全校')}
                     st.rerun()
                 else:
                     st.error("❌ 帳號或密碼錯誤！")
@@ -150,7 +163,7 @@ if app_mode == "🔭 全校巡查登記":
             student_id = st.text_input("請輸入學生學號 (限6碼)：").replace(" ", "")
             if len(student_id) == 6 and student_id in student_db:
                 info = student_db[student_id]
-                selected_class, student_name, seat_num = info["班級"], info["姓名"], info["座號"]
+                selected_class, student_name, seat_num = info.get("班級","-"), info.get("姓名","-"), info.get("座號","-")
                 st.success(f"✅ 查獲：{selected_class} {seat_num}號 {student_name}")
             else:
                 selected_class, student_name, seat_num = "-", "-", "-"
@@ -168,7 +181,7 @@ if app_mode == "🔭 全校巡查登記":
                 else: score_num = 0
 
     if st.button("➕ 加入下方暫存清單", use_container_width=True):
-        if record_type == "個人違規紀錄" and (len(student_id) != 6 or student_name == "未知"):
+        if record_type == "個人違規紀錄" and (len(student_id) != 6 or student_name == "未知" or student_name == "-"):
             st.error("⚠️ 個人紀錄請務必輸入正確的 6 碼學號！")
         else:
             st.session_state.temp_records.append({
@@ -204,7 +217,7 @@ elif app_mode == "📝 僑生假單申請":
     class_students = df_students[df_students["班級"] == target_class].copy()
     
     if class_students.empty:
-        st.warning(f"名單資料庫中查無 {target_class} 的學生資料。")
+        st.warning(f"名單資料庫中查無 {target_class} 的學生資料，請確認學生名單。")
     else:
         class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
         with st.expander("第一步：設定假別並加入本週清單 (可重複分批加入)", expanded=True):
@@ -242,8 +255,8 @@ elif app_mode == "📝 僑生假單申請":
                 else:
                     for _, s in selected_data.iterrows():
                         record = {
-                            "班級": target_class, "座號": s['座號'], "學號": s['學號'], "姓名": s['姓名'],
-                            "學生手機": s['學生手機'], "家長電話": s['家長聯絡電話'], "類別": l_type, "起訖日期": f"{start_dt} ~ {end_dt}", 
+                            "班級": target_class, "座號": s.get('座號',''), "學號": s.get('學號',''), "姓名": s.get('姓名',''),
+                            "學生手機": s.get('學生手機',''), "家長電話": s.get('家長聯絡電話',''), "類別": l_type, "起訖日期": f"{start_dt} ~ {end_dt}", 
                             "返校時間": "21:00點名" if l_type == "外宿" else l_time.strftime('%H:%M'),
                             "事由與細節": reason + (f" | {stay_loc}" if l_type == "外宿" else ""),
                             "親友資訊": stay_info if l_type == "外宿" else "-",
@@ -290,7 +303,7 @@ elif app_mode == "📝 僑生假單申請":
             components.html(st.session_state.print_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組三：綜合數據中心 (包含編輯與校長呈核報表)
+# 模組三：綜合數據中心
 # ==========================================
 elif app_mode == "📊 綜合數據中心 (管理員專屬)":
     st.header("📊 綜合數據中心")
@@ -300,13 +313,10 @@ elif app_mode == "📊 綜合數據中心 (管理員專屬)":
     
     with tab1:
         st.subheader("巡查紀錄維護 (可直接點擊表格修改/刪除)")
-        st.info("💡 提醒：在此表格內修改或刪除資料後，請務必點擊下方「儲存修改至雲端」按鈕。")
-        all_patrol = sheet_records.get_all_records()
-        if len(all_patrol) > 0:
-            df_patrol = pd.DataFrame(all_patrol)
+        df_patrol = safe_get_dataframe(sheet_records)
+        if not df_patrol.empty:
             edited_df = st.data_editor(df_patrol, num_rows="dynamic", use_container_width=True, height=400)
             if st.button("💾 儲存修改至雲端", type="primary"):
-                # 將修改後的資料完整覆蓋回 Google Sheet
                 sheet_records.clear()
                 sheet_records.update(values=[edited_df.columns.tolist()] + edited_df.values.tolist(), range_name='A1')
                 st.success("✅ 資料庫已成功更新！")
@@ -315,9 +325,8 @@ elif app_mode == "📊 綜合數據中心 (管理員專屬)":
             
     with tab2:
         st.subheader("僑生請假/外散宿總表維護")
-        leave_data = sheet_leave.get_all_records()
-        if len(leave_data) > 0:
-            df_leave = pd.DataFrame(leave_data)
+        df_leave = safe_get_dataframe(sheet_leave)
+        if not df_leave.empty:
             edited_leave_df = st.data_editor(df_leave, num_rows="dynamic", use_container_width=True, height=400)
             col_l1, col_l2 = st.columns(2)
             with col_l1:
@@ -333,15 +342,14 @@ elif app_mode == "📊 綜合數據中心 (管理員專屬)":
             
     with tab3:
         st.subheader("🖨️ 產製今日巡查呈核報表 (紙本用印)")
-        if len(all_patrol) > 0:
+        df_patrol = safe_get_dataframe(sheet_records)
+        if not df_patrol.empty and '日期' in df_patrol.columns:
             df_today = df_patrol[df_patrol['日期'] == today_date]
             if not df_today.empty:
-                # 數據分類邏輯
-                df_class = df_today[(df_today['對象'] == '班級') & (~df_today['時間'].str.contains('午休', na=False))]
-                df_noon = df_today[(df_today['對象'] == '班級') & (df_today['時間'].str.contains('午休', na=False))]
+                df_class = df_today[(df_today['對象'] == '班級') & (~df_today['時間'].str.contains('午休', na=False, regex=False))]
+                df_noon = df_today[(df_today['對象'] == '班級') & (df_today['時間'].str.contains('午休', na=False, regex=False))]
                 df_personal = df_today[df_today['對象'] == '個人']
                 
-                # 將 DataFrame 轉為 HTML 表格
                 def df_to_html(df, cols):
                     if df.empty: return "<tr><td colspan='10'>無紀錄</td></tr>"
                     html = ""
