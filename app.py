@@ -53,7 +53,6 @@ try:
     doc = client.open("全校巡查總資料庫")
     sheet_records = doc.sheet1  
     
-    # 確保所需分頁存在
     def ensure_sheet(title, headers):
         try:
             return doc.worksheet(title)
@@ -72,13 +71,24 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 讀取資料庫
+# 讀取資料庫 (🌟 加入智慧欄位辨識)
 # ==========================================
 def load_data():
     try:
         df_stu = safe_get_dataframe(doc.worksheet("學生名單"))
+        
+        # 🌟 智慧轉換：容許教務處匯出的不同欄位名稱
+        rename_map = {
+            "班級名稱": "班級",
+            "手機號碼": "學生手機",
+            "家長電話": "家長聯絡電話"
+        }
+        df_stu.rename(columns=rename_map, inplace=True)
+        
+        # 補齊必要欄位避免報錯
         for col in ['學號', '姓名', '班級', '座號', '學生手機', '家長聯絡電話']:
             if col not in df_stu.columns: df_stu[col] = ""
+            
         df_stu['學號'] = df_stu['學號'].astype(str).str.strip()
         df_stu['座號'] = df_stu['座號'].astype(str).str.zfill(2)
         
@@ -300,20 +310,18 @@ elif app_mode == "📝 僑生假單申請":
             components.html(st.session_state.print_leave_html, height=800, scrolling=True)
 
 # ==========================================
-# 模組三：獎懲建議單申請 (含三種搜尋模式)
+# 模組三：獎懲建議單申請
 # ==========================================
 elif app_mode == "🏆 獎懲建議單申請":
     st.header("🏆 獎懲建議單申請作業")
     user = st.session_state.current_user
     
-    # 動態抓取獎懲類別與條文
     rules_dict = {}
     if not df_rules.empty:
         for col in df_rules.columns:
             rules_dict[col] = [r for r in df_rules[col].dropna().tolist() if str(r).strip() != ""]
     
     st.markdown("### 第一步：選擇學生")
-    # 升級：增加「依年級/班級搜尋」模式，造福行政同仁
     input_mode = st.radio("作業模式", ["📌 本班學生 (下拉勾選)", "🏫 依年級/班級搜尋 (跨班利器)", "🔍 輸入學號搜尋"], horizontal=True)
     
     selected_students = pd.DataFrame()
@@ -327,73 +335,55 @@ elif app_mode == "🏆 獎懲建議單申請":
                 class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
                 selected_display = st.multiselect("請勾選本班學生：", class_students["顯示名稱"].tolist())
                 selected_students = class_students[class_students["顯示名稱"].isin(selected_display)]
-            else:
-                st.error(f"查無 {user['class']} 學生資料。")
+            else: st.error(f"查無 {user['class']} 學生資料。")
                 
     elif input_mode == "🏫 依年級/班級搜尋 (跨班利器)":
         col_g, col_c = st.columns(2)
-        with col_g:
-            search_grade = st.selectbox("👉 1. 選擇年級", ["一年級", "二年級", "三年級"])
-        with col_c:
-            search_class = st.selectbox("👉 2. 選擇班級", REAL_CLASS_LIST[search_grade])
+        with col_g: search_grade = st.selectbox("👉 1. 選擇年級", ["一年級", "二年級", "三年級"])
+        with col_c: search_class = st.selectbox("👉 2. 選擇班級", REAL_CLASS_LIST[search_grade])
             
         class_students = df_students[df_students["班級"] == search_class].copy()
         if not class_students.empty:
             class_students["顯示名稱"] = class_students["座號"] + "-" + class_students["姓名"]
             selected_display = st.multiselect(f"👉 3. 請勾選 {search_class} 學生 (可多選)：", class_students["顯示名稱"].tolist())
             selected_students = class_students[class_students["顯示名稱"].isin(selected_display)]
-        else:
-            st.warning(f"名單資料庫中查無 {search_class} 的學生資料。")
+        else: st.warning(f"名單資料庫中查無 {search_class} 的學生資料。")
             
-    else: # 🔍 輸入學號搜尋
+    else: 
         search_id = st.text_input("請輸入學生學號 (限6碼)：").strip()
         if len(search_id) == 6:
             if search_id in student_db:
                 st.success(f"✅ 查獲學生：{student_db[search_id]['班級']} {student_db[search_id]['姓名']}")
                 selected_students = pd.DataFrame([student_db[search_id]])
-            else:
-                st.error("⚠️ 查無此學號！")
+            else: st.error("⚠️ 查無此學號！")
 
-    # --- 進入第二步 ---
     if not selected_students.empty:
         st.markdown("### 第二步：設定獎懲內容")
         with st.form("reward_form", clear_on_submit=False):
             rc1, rc2, rc3 = st.columns([2, 4, 1])
-            with rc1:
-                r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
-            with rc2:
-                r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新試算表"]))
-            with rc3:
-                r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
+            with rc1: r_type = st.selectbox("獎懲類別", list(rules_dict.keys()) if rules_dict else ["嘉獎", "小功", "大功", "警告", "小過", "大過"])
+            with rc2: r_reason = st.selectbox("引用條文/事由", rules_dict.get(r_type, ["無內建法規，請聯絡管理員更新試算表"]))
+            with rc3: r_count = st.selectbox("建議次數", ["乙次", "兩次", "三次"])
                 
             if st.form_submit_button("➕ 將以上設定加入下方建議清單", use_container_width=True):
                 for _, s in selected_students.iterrows():
                     st.session_state.reward_cart.append({
                         "類別": "獎勵" if r_type in ["嘉獎", "小功", "大功"] else "懲處",
-                        "學號": s['學號'], "班級": s['班級'], "座號姓名": f"{s['座號']}{s['姓名']}",
+                        "學號": s['學號'], "班級": s['班級'], "座號姓名": f"{s.get('座號','')}{s.get('姓名','')}",
                         "獎懲項目": r_type, "事由": r_reason, "建議次數": r_count, "導師簽名": user["name"]
                     })
                 st.success("✅ 已加入清單！您可以切換班級繼續新增其他學生的獎懲。")
 
     if len(st.session_state.reward_cart) > 0:
         st.markdown("### 🛒 待送出之獎懲建議清單 (跨班總結算)")
-        df_cart = pd.DataFrame(st.session_state.reward_cart)
-        st.dataframe(df_cart, use_container_width=True)
-        
+        st.dataframe(pd.DataFrame(st.session_state.reward_cart), use_container_width=True)
         col_s, col_c = st.columns(2)
         with col_s:
             if st.button("🚀 確認無誤，寫入並產製 PDF 建議單", type="primary", use_container_width=True):
-                # 寫入資料庫
                 upload_rows = [[today_date, r['類別'], r['學號'], r['班級'], r['座號姓名'], r['獎懲項目'], r['事由'], r['建議次數'], r['導師簽名']] for r in st.session_state.reward_cart]
                 sheet_rewards_log.append_rows(upload_rows)
-                
-                # 產製 PDF HTML (依據獎勵或懲處分開顯示標題)
                 main_type = "獎勵" if st.session_state.reward_cart[0]['類別'] == "獎勵" else "懲處"
-                
-                rows_html = ""
-                for idx, r in enumerate(st.session_state.reward_cart):
-                    rows_html += f"<tr><td>{idx+1}</td><td>{r['學號']}</td><td>{r['班級']}</td><td>{r['座號姓名']}</td><td>{r['獎懲項目']}</td><td style='text-align:left;'>{r['事由']}</td><td>{r['建議次數']}</td><td>{r['導師簽名']}</td></tr>"
-                
+                rows_html = "".join([f"<tr><td>{idx+1}</td><td>{r['學號']}</td><td>{r['班級']}</td><td>{r['座號姓名']}</td><td>{r['獎懲項目']}</td><td style='text-align:left;'>{r['事由']}</td><td>{r['建議次數']}</td><td>{r['導師簽名']}</td></tr>" for idx, r in enumerate(st.session_state.reward_cart)])
                 st.session_state.print_reward_html = f"""
                 <!DOCTYPE html><html><head><meta charset="utf-8"><style>
                     body {{ font-family: "Microsoft JhengHei", sans-serif; padding: 20px; }}
@@ -401,11 +391,8 @@ elif app_mode == "🏆 獎懲建議單申請":
                     #btn {{ margin-bottom: 20px; padding: 12px; background: #FF4B4B; color: white; border: none; width: 100%; font-size: 18px; font-weight: bold; cursor: pointer; }}
                     .title {{ text-align: center; font-size: 24px; font-weight: bold; margin-bottom: 5px; }}
                     .subtitle {{ text-align: right; font-size: 14px; margin-bottom: 10px; }}
-                    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }} 
-                    th, td {{ border: 1px solid black; padding: 10px; text-align: center; }} 
-                    th {{ background-color: #f2f2f2; }}
-                    .sig {{ display: flex; justify-content: space-between; margin-top: 60px; }} 
-                    .box {{ text-align: center; width: 22%; font-weight: bold; font-size: 16px; border-top: 1px dotted black; padding-top: 10px; }}
+                    table {{ width: 100%; border-collapse: collapse; font-size: 14px; }} th, td {{ border: 1px solid black; padding: 10px; text-align: center; }} th {{ background-color: #f2f2f2; }}
+                    .sig {{ display: flex; justify-content: space-between; margin-top: 60px; }} .box {{ text-align: center; width: 22%; font-weight: bold; font-size: 16px; border-top: 1px dotted black; padding-top: 10px; }}
                 </style></head><body>
                     <button id="btn" onclick="window.print()">🖨️ 點此列印 {main_type}建議單</button>
                     <div class="title">新北市私立樹人家商{main_type}建議單</div>
